@@ -74,7 +74,7 @@ jobs:
           python -m venv /tmp/wheel-smoke
           /tmp/wheel-smoke/bin/pip install dist/*.whl
           /tmp/wheel-smoke/bin/python -m mot --dump-config >/dev/null
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/*
