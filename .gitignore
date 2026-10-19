@@ -1,0 +1,59 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+src/*.egg-info/
+pip-wheel-metadata/
+MANIFEST
+.venv/
+venv/
+env/
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Runtime artifacts: may contain identifiable people, never commit
+outputs/
+*.csv
+!requirements*.csv
+
+# Video / image artifacts produced by the tool
+*.png
+*.jpg
+*.jpeg
+*.mp4
+*.avi
+*.mov
+!docs/**/*.png
+!docs/**/*.svg
+
+# Model weights (large, untrusted, licence-dependent)
+*.pt
+*.pth
+*.onnx
+*.engine
+yolov*.pt
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local config overrides
+configs/local.yaml
+.env

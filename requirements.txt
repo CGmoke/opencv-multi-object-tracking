@@ -1,0 +1,6 @@
+# Runtime dependencies.
+# opencv-contrib-python is required: TrackerCSRT / TrackerKCF live in the
+# contrib (opencv-contrib) build, not in plain opencv-python.
+numpy>=1.21
+opencv-contrib-python>=4.5.1
+PyYAML>=5.4

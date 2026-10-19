@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题
+    url: https://github.com/CGmoke/opencv-multi-object-tracking/security/advisories/new
+    about: 请勿公开提交安全漏洞，使用私有报告渠道
+  - name: 使用问题 / 讨论
+    url: https://github.com/CGmoke/opencv-multi-object-tracking/discussions
+    about: 安装、配置、参数调优等非缺陷问题

@@ -1,0 +1,47 @@
+# ---------------------------------------------------------------------------
+# Multi-object tracking configuration
+#
+# Every value can be overridden on the command line, e.g.
+#   mot-track --config configs/default.yaml --source 0 --tracker kcf
+# Unknown keys are rejected on purpose (typos should fail, not be ignored).
+# ---------------------------------------------------------------------------
+source:
+  # Camera index ("0") or path to a video file ("assets/demo.mp4").
+  source: "0"
+  # Stop after N processed frames; null means "until the stream ends".
+  max_frames: null
+  # Restart a video file when it ends (ignored for cameras).
+  loop: false
+  # Initial target boxes as [x, y, w, h]; also available as --seed-box.
+  seed_boxes: []
+
+tracking:
+  # csrt = accurate/slow, kcf = fast/looser, mil/mosse = experimental.
+  backend: csrt
+  # Minimum IoU for a detection to keep an existing id and for duplicate
+  # suppression. Lower = fewer duplicate ids, higher = fewer id swaps.
+  iou_threshold: 0.3
+  # Frames a lost target may keep its id before the id is destroyed.
+  max_missing: 15
+  # Maximum trail points kept per target (trail_length / fps = seconds).
+  trail_length: 120
+  # greedy (default, dependency free) or hungarian (requires scipy).
+  match_method: greedy
+  # Hard cap on simultaneously live ids (memory guard).
+  max_tracks: 256
+
+display:
+  enabled: true
+  show_trails: true
+  show_labels: true
+  show_hud: true
+  trail_fade: true
+  window_name: "OpenCV MOT"
+
+output:
+  # Per-frame trajectory rows; null disables csv export.
+  csv_path: "outputs/trajectories.csv"
+  # Optional annotated video (mp4/avi); null disables recording.
+  video_path: null
+  # Append to an existing csv instead of truncating it (also --append).
+  append: false
