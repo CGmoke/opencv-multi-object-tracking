@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opencv-multi-object-tracking"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pure-OpenCV multi-object tracking: per-object CSRT/KCF trackers, IoU association, unique IDs, trails and CSV export."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -44,7 +44,8 @@ detect = ["ultralytics>=8.0"]
 dev = ["pytest>=7", "ruff>=0.4"]
 
 [project.scripts]
-mot-track = "mot.app:main"
+# 组合根：接口层 CLI（见 docs/ARCHITECTURE_DESIGN.md §3.4，落地于步骤 E22）
+mot-track = "mot.interfaces.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/CGmoke/opencv-multi-object-tracking"
@@ -63,6 +64,8 @@ mot = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# src 布局：测试无需 pip install 即可 import mot
+pythonpath = ["src"]
 markers = [
     "opencv: requires an OpenCV build that ships the tracking module",
     "slow: end-to-end tests that render video frames",
