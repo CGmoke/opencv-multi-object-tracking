@@ -54,13 +54,21 @@ class TestGreedyMatch:
         assert pairs == [(1, 0), (0, 1)]
 
 
+needs_scipy = pytest.mark.skipif(
+    not scipy_available(),
+    reason="scipy is optional: pip install 'opencv-multi-object-tracking[hungarian]'",
+)
+
+
 class TestHungarianMatch:
+    @needs_scipy
     def test_respects_threshold(self):
         pairs, rows, cols = hungarian_match(np.array([[0.9, 0.1]]), 0.3)
         assert pairs == [(0, 0)]
         assert cols == [1]
         assert rows == []
 
+    @needs_scipy
     def test_beats_greedy_on_a_conflict(self):
         # Greedy grabs (0, 0)=0.60 and strands row 1; the optimal assignment
         # is (0, 1)+(1, 0) with a larger total overlap.
@@ -70,6 +78,7 @@ class TestHungarianMatch:
         assert greedy_pairs == [(0, 0)]
         assert optimal_pairs == [(1, 0), (0, 1)]
 
+    @needs_scipy
     def test_returns_every_row_when_no_column_is_available(self):
         pairs, rows, cols = hungarian_match(np.zeros((2, 1)), 0.3)
         assert pairs == []
@@ -77,6 +86,7 @@ class TestHungarianMatch:
         assert cols == [0]
 
     def test_empty_matrix(self):
+        # Works with or without scipy: an empty row set yields no pairs.
         pairs, rows, cols = hungarian_match(np.zeros((0, 3)), 0.3)
         assert pairs == [] and rows == [] and cols == [0, 1, 2]
 
