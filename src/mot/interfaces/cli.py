@@ -21,7 +21,7 @@ import yaml
 from mot.adapters.clock import MonotonicClock
 from mot.adapters.sinks.csv import CsvTrajectoryWriter
 from mot.adapters.sinks.video import VideoWriterSink
-from mot.adapters.sources import VideoSource
+from mot.adapters.sources import open_source
 from mot.adapters.trackers import (
     BACKEND_NOTES,
     init_tracker,
@@ -106,6 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-tracks", type=int, default=None, help="hard cap on simultaneously live ids"
     )
     parser.add_argument(
+        "--box-smoothing",
+        dest="box_smoothing",
+        type=float,
+        default=None,
+        help="EMA alpha for detection boxes: 1 = raw, smaller = steadier but laggier",
+    )
+    parser.add_argument(
         "--match-method",
         choices=list(MATCH_METHODS),
         default=None,
@@ -136,6 +143,95 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="detector confidence threshold",
+    )
+    parser.add_argument(
+        "--motion",
+        action="store_true",
+        help="auto-detect moving objects by background modelling (no model weights needed)",
+    )
+    parser.add_argument(
+        "--motion-sensitivity",
+        dest="motion_var_threshold",
+        type=float,
+        default=None,
+        help="background diff threshold; smaller = more sensitive",
+    )
+    parser.add_argument(
+        "--motion-min-area",
+        dest="motion_min_area",
+        type=float,
+        default=None,
+        help="minimum foreground area in pixels (noise filter)",
+    )
+    parser.add_argument(
+        "--motion-min-size",
+        dest="motion_min_size",
+        type=int,
+        default=None,
+        help="minimum box side in pixels (noise filter)",
+    )
+    parser.add_argument(
+        "--motion-min-motion",
+        dest="motion_min_motion",
+        type=float,
+        default=None,
+        help="minimum displacement in pixels to count as moving (static filter)",
+    )
+    parser.add_argument(
+        "--motion-min-consecutive",
+        dest="motion_min_consecutive",
+        type=int,
+        default=None,
+        help="frames a candidate must persist before it is accepted",
+    )
+    parser.add_argument(
+        "--motion-min-fill",
+        dest="motion_min_fill",
+        type=float,
+        default=None,
+        help="minimum contour/bounding-box fill ratio (0 disables; rejects hollow fragments)",
+    )
+    parser.add_argument(
+        "--motion-merge-iou",
+        dest="motion_merge_iou",
+        type=float,
+        default=None,
+        help="merge fragment boxes whose IoU reaches this value (same object)",
+    )
+    parser.add_argument(
+        "--motion-merge-gap",
+        dest="motion_merge_gap",
+        type=float,
+        default=None,
+        help="merge fragment boxes with an edge gap up to N pixels (0 = touching/overlap only)",
+    )
+    parser.add_argument(
+        "--motion-nms-iou",
+        dest="motion_nms_iou",
+        type=float,
+        default=None,
+        help="NMS IoU threshold; overlapping boxes keep the larger/whole one",
+    )
+    parser.add_argument(
+        "--motion-nms-containment",
+        dest="motion_nms_containment",
+        type=float,
+        default=None,
+        help="suppress a box contained in a larger one at this overlap ratio",
+    )
+    parser.add_argument(
+        "--motion-interval",
+        dest="motion_interval",
+        type=int,
+        default=None,
+        help="run motion detection every N frames (first frame always runs it)",
+    )
+    parser.add_argument(
+        "--motion-ppm",
+        dest="motion_ppm",
+        type=float,
+        default=None,
+        help="pixels per metre calibration for real-world size (omit for pixel size)",
     )
     parser.add_argument(
         "--csv",
@@ -179,6 +275,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dump-config", action="store_true", help="print the resolved configuration and exit"
     )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="start the local web monitoring UI (needs the 'web' extra)",
+    )
+    parser.add_argument(
+        "--web-host", dest="web_host", default=None, help="web UI bind address (default 127.0.0.1)"
+    )
+    parser.add_argument(
+        "--web-port", dest="web_port", type=int, default=None, help="web UI port (default 8000)"
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="debug logging")
     return parser
 
@@ -200,6 +307,8 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.tracking.match_method = args.match_method
     if getattr(args, "max_tracks", None) is not None:
         config.tracking.max_tracks = args.max_tracks
+    if getattr(args, "box_smoothing", None) is not None:
+        config.tracking.box_smoothing = args.box_smoothing
     if args.detector is not None:
         config.detector.backend = args.detector
     if args.detector_model is not None:
@@ -208,6 +317,33 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.detector.interval = args.detector_interval
     if args.detector_conf is not None:
         config.detector.confidence = args.detector_conf
+    if getattr(args, "motion", False):
+        config.motion.enabled = True
+    if getattr(args, "motion_var_threshold", None) is not None:
+        config.motion.var_threshold = args.motion_var_threshold
+    if getattr(args, "motion_min_area", None) is not None:
+        config.motion.min_area_px = args.motion_min_area
+    if getattr(args, "motion_min_size", None) is not None:
+        config.motion.min_width_px = args.motion_min_size
+        config.motion.min_height_px = args.motion_min_size
+    if getattr(args, "motion_min_motion", None) is not None:
+        config.motion.min_motion_px = args.motion_min_motion
+    if getattr(args, "motion_min_consecutive", None) is not None:
+        config.motion.min_consecutive = args.motion_min_consecutive
+    if getattr(args, "motion_min_fill", None) is not None:
+        config.motion.min_fill_ratio = args.motion_min_fill
+    if getattr(args, "motion_merge_iou", None) is not None:
+        config.motion.merge_iou = args.motion_merge_iou
+    if getattr(args, "motion_merge_gap", None) is not None:
+        config.motion.merge_gap_px = args.motion_merge_gap
+    if getattr(args, "motion_nms_iou", None) is not None:
+        config.motion.nms_iou = args.motion_nms_iou
+    if getattr(args, "motion_nms_containment", None) is not None:
+        config.motion.nms_containment = args.motion_nms_containment
+    if getattr(args, "motion_interval", None) is not None:
+        config.motion.interval = args.motion_interval
+    if getattr(args, "motion_ppm", None) is not None:
+        config.motion.pixels_per_meter = args.motion_ppm
     if args.csv_path is not None:
         text = str(args.csv_path).strip()
         config.output.csv_path = None if text.lower() in ("none", "-", "") else text
@@ -223,6 +359,10 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.source.loop = True
     if args.no_display:
         config.display.enabled = False
+    if getattr(args, "web_host", None) is not None:
+        config.web.host = args.web_host
+    if getattr(args, "web_port", None) is not None:
+        config.web.port = args.web_port
     config.validate()
     return config
 
@@ -262,6 +402,40 @@ def build_detector(config: AppConfig) -> Optional[Any]:
     raise ConfigError(f"unsupported detector backend {backend!r}")
 
 
+def _build_motion(config: AppConfig) -> Optional[Any]:
+    """按配置构造运动检测器；未启用时返回 ``None``。"""
+    if not config.motion.enabled:
+        return None
+    from mot.adapters.motion import MotionDetector
+
+    return MotionDetector(
+        history=config.motion.history,
+        var_threshold=config.motion.var_threshold,
+        learning_rate=config.motion.learning_rate,
+        min_area_px=config.motion.min_area_px,
+        min_width_px=config.motion.min_width_px,
+        min_height_px=config.motion.min_height_px,
+        max_area_ratio=config.motion.max_area_ratio,
+        min_fill_ratio=config.motion.min_fill_ratio,
+        merge_iou=config.motion.merge_iou,
+        merge_gap_px=config.motion.merge_gap_px,
+        nms_iou=config.motion.nms_iou,
+        nms_containment=config.motion.nms_containment,
+        min_consecutive=config.motion.min_consecutive,
+        min_motion_px=config.motion.min_motion_px,
+        morph_kernel=config.motion.morph_kernel,
+        warmup_frames=config.motion.warmup_frames,
+        warmup_rate=config.motion.warmup_rate,
+    )
+
+
+def _detection_interval(config: AppConfig) -> int:
+    """检测周期：用外部检测器时取 ``detector.interval``，否则取 ``motion.interval``。"""
+    if config.detector.backend != "none":
+        return config.detector.interval
+    return config.motion.interval
+
+
 def _print_summary(
     stats: SessionStats,
     elapsed: float,
@@ -298,16 +472,21 @@ def run(config: AppConfig) -> int:
             trail_length=config.tracking.trail_length,
             match_method=config.tracking.match_method,
             max_tracks=config.tracking.max_tracks,
+            box_smoothing=config.tracking.box_smoothing,
         )
         detector = build_detector(config)
+        if detector is None and config.motion.enabled:
+            detector = _build_motion(config)
     except (TrackerSetupError, ConfigError, ImportError) as exc:
         LOGGER.error("%s", exc)
         return 2
 
-    pipeline = MOTPipeline(manager, detector=detector, detection_interval=config.detector.interval)
+    pipeline = MOTPipeline(
+        manager, detector=detector, detection_interval=_detection_interval(config)
+    )
 
     try:
-        source = VideoSource(config.source.source, loop=config.source.loop)
+        source = open_source(config.source.source, loop=config.source.loop)
     except SourceError as exc:
         LOGGER.error("%s", exc)
         return 2
@@ -353,6 +532,9 @@ def run(config: AppConfig) -> int:
                 show_labels=config.display.show_labels,
                 show_hud=config.display.show_hud,
                 trail_fade=config.display.trail_fade,
+                pixels_per_meter=config.motion.pixels_per_meter,
+                small_max_m=config.motion.small_max_m,
+                large_min_m=config.motion.large_min_m,
                 show_display=show_display,
                 video_sink=video_sink,
             )
@@ -377,6 +559,22 @@ def run(config: AppConfig) -> int:
     return stats.exit_code
 
 
+def _run_web(config: AppConfig) -> int:
+    """启动本地 Web 监测界面（需要可选 extra：``pip install -e ".[web]"``）。"""
+    try:
+        from mot.interfaces.web import serve
+    except ModuleNotFoundError as exc:
+        print(
+            "Web 界面需要可选依赖 Flask，请先安装：\n"
+            "  python3 -m venv .venv && source .venv/bin/activate\n"
+            '  pip install -e ".[web]"\n'
+            f"（若系统 Python 受 PEP 668 保护，必须用虚拟环境；缺依赖：{exc}）",
+            file=sys.stderr,
+        )
+        return 2
+    return serve(config)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -394,6 +592,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.dump_config:
         print(yaml.safe_dump(config.to_dict(), sort_keys=False, allow_unicode=True).rstrip())
         return 0
+
+    if args.web:
+        return _run_web(config)
 
     try:
         return run(config)

@@ -101,6 +101,8 @@ class TestValidation:
             ("tracking", "  max_missing: -1\n"),
             ("tracking", "  trail_length: 0\n"),
             ("tracking", "  match_method: magic\n"),
+            ("tracking", "  box_smoothing: 0\n"),
+            ("tracking", "  box_smoothing: 1.5\n"),
             ("source", "  max_frames: 0\n"),
             ("source", "  loop: 'yes'\n"),
             ("source", "  source: ''\n"),
@@ -183,10 +185,82 @@ class TestDetectorSection:
             AppConfig.from_file(write(tmp_path, "detector:\n  weight: y.pt\n"))
 
 
+class TestMotionSection:
+    def test_defaults_are_disabled(self):
+        motion = AppConfig.defaults().motion
+        assert motion.enabled is False
+        assert motion.min_area_px == 200.0
+        assert motion.pixels_per_meter is None
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "  var_threshold: 0\n",
+            "  min_area_px: -1\n",
+            "  min_width_px: 0\n",
+            "  min_consecutive: 0\n",
+            "  min_motion_px: -1\n",
+            "  max_area_ratio: 0\n",
+            "  min_fill_ratio: -0.1\n",
+            "  merge_iou: 1.1\n",
+            "  merge_gap_px: -1\n",
+            "  nms_iou: -0.1\n",
+            "  nms_containment: 0\n",
+            "  interval: 0\n",
+            "  enabled: 'yes'\n",
+            "  large_min_m: 0.1\n",
+            "  pixels_per_meter: 0\n",
+        ],
+    )
+    def test_invalid_values_are_rejected(self, tmp_path, payload):
+        with pytest.raises(ConfigError):
+            AppConfig.from_file(write(tmp_path, f"motion:\n{payload}"))
+
+    def test_unknown_motion_key_is_rejected(self, tmp_path):
+        with pytest.raises(ConfigError, match="unknown key"):
+            AppConfig.from_file(write(tmp_path, "motion:\n  thresholds: 5\n"))
+
+
+class TestWebSection:
+    def test_defaults(self):
+        web = AppConfig.defaults().web
+        assert web.host == "127.0.0.1"
+        assert web.port == 8000
+        assert web.max_sessions == 4
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "  port: 0\n",
+            "  port: 70000\n",
+            "  max_sessions: 0\n",
+            "  stream_fps: 0\n",
+            "  host: ''\n",
+            "  max_upload_bytes: 0\n",
+            "  upload_dir: ''\n",
+        ],
+    )
+    def test_invalid_values_are_rejected(self, tmp_path, payload):
+        with pytest.raises(ConfigError):
+            AppConfig.from_file(write(tmp_path, f"web:\n{payload}"))
+
+    def test_unknown_web_key_is_rejected(self, tmp_path):
+        with pytest.raises(ConfigError, match="unknown key"):
+            AppConfig.from_file(write(tmp_path, "web:\n  threads: 8\n"))
+
+
 class TestRoundTrip:
     def test_to_dict_contains_every_section(self):
         data = AppConfig.defaults().to_dict()
-        assert set(data) == {"tracking", "detector", "display", "output", "source"}
+        assert set(data) == {
+            "tracking",
+            "detector",
+            "motion",
+            "display",
+            "output",
+            "source",
+            "web",
+        }
         assert data["source"]["seed_boxes"] == []
 
     def test_from_file_accepts_its_own_output(self, tmp_path):

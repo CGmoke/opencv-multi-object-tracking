@@ -72,6 +72,28 @@ class TestAssociation:
         assert manager.get(2).bbox == (101.0, 100.0, 20.0, 20.0)
 
 
+class TestBoxSmoothing:
+    def test_default_uses_the_detection_box_verbatim(self, make_manager, pool):
+        manager = make_manager(pool)
+        manager.step(None, [Detection(BOX)])
+        manager.step(None, [Detection((12, 10, 20, 20))])
+        assert manager.get(1).bbox == (12.0, 10.0, 20.0, 20.0)
+
+    def test_ema_blends_detection_into_the_existing_box(self, make_manager, pool):
+        manager = make_manager(pool, box_smoothing=0.5)
+        manager.step(None, [Detection(BOX)])
+        manager.step(None, [Detection((20, 10, 20, 20))])
+        assert manager.get(1).bbox == (15.0, 10.0, 20.0, 20.0)
+
+    def test_lost_track_snaps_to_the_detection_instead_of_drifting(self, make_manager, pool):
+        manager = make_manager(pool, box_smoothing=0.5, max_missing=5)
+        manager.step(None, [Detection(BOX)])
+        pool.trackers[0].alive = False
+        manager.step(None)  # 跟踪器丢失 → LOST
+        manager.step(None, [Detection((20, 10, 20, 20))])
+        assert manager.get(1).bbox == (20.0, 10.0, 20.0, 20.0)
+
+
 class TestLossAndExpiry:
     def test_track_keeps_its_id_while_missing(self, make_manager, pool):
         manager = make_manager(pool, max_missing=3)
@@ -260,6 +282,8 @@ class TestValidation:
             {"max_missing": -1},
             {"trail_length": 0},
             {"match_method": "nope"},
+            {"box_smoothing": 0.0},
+            {"box_smoothing": 1.5},
         ],
     )
     def test_invalid_arguments_raise(self, make_manager, pool, kwargs):

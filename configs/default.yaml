@@ -29,6 +29,9 @@ tracking:
   match_method: greedy
   # Hard cap on simultaneously live ids (memory guard).
   max_tracks: 256
+  # EMA alpha applied when a detection re-anchors an existing id.
+  # 1.0 = use the detection box as-is; smaller = steadier box, slightly laggier.
+  box_smoothing: 1.0
 
 detector:
   # Optional detector hook; "none" disables it (boxes then come from the mouse
@@ -41,6 +44,45 @@ detector:
   classes: []
   # Run the detector every N frames; the first frame always runs it.
   interval: 1
+
+motion:
+  # Auto-detect moving objects with background modelling — no model weights needed.
+  # Enable with `--motion` or set enabled: true. When both detector and motion are
+  # configured, the detector wins.
+  enabled: false
+  # Sensitivity: smaller = more sensitive to small intensity changes.
+  var_threshold: 16.0
+  # Background learning rate after warm-up. 0.0 freezes the model so a moving object
+  # stays fully in the foreground (accurate boxes); raise it if lighting drifts.
+  learning_rate: 0.0
+  warmup_frames: 20
+  warmup_rate: 0.05
+  # Minimum target size thresholds (noise/speckle filter).
+  min_area_px: 200.0
+  min_width_px: 8
+  min_height_px: 8
+  # Reject foreground covering more than this fraction of the frame (scene-wide change).
+  max_area_ratio: 0.6
+  # Reject hollow/fragmented contours below this contour/box fill ratio (0 = off).
+  min_fill_ratio: 0.0
+  # Fragment merging: boxes of the same object (IoU >= merge_iou, or edge gap
+  # <= merge_gap_px) become one whole-object box. gap 0 only merges overlapping or
+  # touching boxes, so genuinely separate neighbours are never merged.
+  merge_iou: 0.15
+  merge_gap_px: 0.0
+  # NMS: drop overlapping boxes and boxes contained in a larger whole-object box.
+  nms_iou: 0.6
+  nms_containment: 0.8
+  # A candidate must persist this many frames AND move at least min_motion_px.
+  min_consecutive: 2
+  min_motion_px: 6.0
+  morph_kernel: 3
+  # Run motion detection every N frames; the first frame always runs it.
+  interval: 2
+  # Real-world size calibration: pixels per metre at the target depth (null = pixels only).
+  pixels_per_meter: null
+  small_max_m: 0.5
+  large_min_m: 2.0
 
 display:
   enabled: true
@@ -57,3 +99,17 @@ output:
   video_path: null
   # Append to an existing csv instead of truncating it (also --append).
   append: false
+
+web:
+  # Local web monitoring UI (requires the optional extra: pip install -e ".[web]").
+  # Binds to localhost by default; use --web-host 0.0.0.0 to expose on the LAN.
+  host: "127.0.0.1"
+  port: 8000
+  # Maximum number of concurrent tracking sessions (camera / RTSP / upload / browser).
+  max_sessions: 4
+  # MJPEG stream and browser-frame rate cap.
+  stream_fps: 15.0
+  # Where uploaded videos are stored; null means a temporary directory.
+  upload_dir: null
+  # Reject uploads larger than this many bytes.
+  max_upload_bytes: 2000000000

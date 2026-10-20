@@ -19,6 +19,8 @@
 - [目录结构](#目录结构)
 - [快速开始](#快速开始)
 - [命令行](#命令行)
+- [Web 界面](#web-界面)
+- [自动运动检测](#自动运动检测)
 - [交互按键](#交互按键)
 - [配置文件](#配置文件)
 - [轨迹 CSV](#轨迹-csv)
@@ -134,6 +136,7 @@ mot-track --dump-config --iou-threshold 0.4 --tracker kcf
 | `--max-missing` | `15` | 丢失目标最多保留 ID 的帧数 |
 | `--trail-length` | `120` | 每个目标保留的轨迹点上限 |
 | `--max-tracks` | `256` | 同时存活 ID 的硬上限 |
+| `--box-smoothing` | `1.0` | 检测框 EMA 平滑系数（`1`=不平滑，越小越稳但略滞后） |
 | `--match-method` | `greedy` | `greedy` 或 `hungarian`（后者需要 scipy） |
 | `--csv` | `outputs/trajectories.csv` | 轨迹输出路径，传 `none` 关闭 |
 | `--append` | 关 | 追加写而不是截断已有 CSV |
@@ -145,10 +148,128 @@ mot-track --dump-config --iou-threshold 0.4 --tracker kcf
 | `--list-trackers` | — | 打印可用后端并退出 |
 | `--dump-config` | — | 打印最终配置并退出 |
 | `--verbose, -v` | 关 | 调试日志 |
+| `--motion` | 关 | 自动检测移动物体（背景建模，无需模型权重） |
+| `--motion-sensitivity` | `16` | 背景差异阈值，**越小越敏感** |
+| `--motion-min-area` | `200` | 最小前景面积（像素，噪点过滤） |
+| `--motion-min-size` | `8` | 最小目标边长（像素，尺寸阈值） |
+| `--motion-min-motion` | `6` | 最小位移（像素，排除静止物体） |
+| `--motion-min-consecutive` | `2` | 连续命中帧数（抑制单帧噪点） |
+| `--motion-min-fill` | `0` | 轮廓填充率下限（剔除中空/破碎碎片，`0` 关闭） |
+| `--motion-merge-iou` | `0.15` | 碎片框合并的 IoU 阈值（同一物体拆成多块时合并） |
+| `--motion-merge-gap` | `0` | 碎片合并的最大正间隙（像素，`0` 关闭间隙合并） |
+| `--motion-nms-iou` | `0.6` | NMS IoU 阈值（重叠框只留整体框） |
+| `--motion-nms-containment` | `0.8` | 局部框被大框覆盖比例达到该值时抑制 |
+| `--motion-interval` | `2` | 每 N 帧做一次运动检测（首帧总是检测） |
+| `--motion-ppm` | — | 尺寸标定：每米像素数（用于换算实际尺寸） |
+| `--web` | 关 | 启动本地 Web 监测界面（需 `pip install -e ".[web]"`） |
+| `--web-host` | `127.0.0.1` | Web 界面监听地址（局域网用 `0.0.0.0`） |
+| `--web-port` | `8000` | Web 界面端口 |
 
 退出码：`0` 正常，`1` 未读取到任何帧，`2` 参数 / 配置 / 跟踪器 / 输入输出错误，`130` 被 `Ctrl-C` 中断。
 
 轨迹 CSV、录像与截图等运行时产物默认写入仓库内的产物目录（已被 `.gitignore` 忽略，不会上传），上表中出现的默认路径只描述程序行为，不是仓库内容。
+
+## Web 界面
+
+在浏览器里实时查看跟踪画面与统计，输入源覆盖**本机摄像头 / RTSP-IP 网络流 / 上传视频 / 浏览器摄像头**四类。
+
+```bash
+# Debian/Ubuntu 的系统 Python 受 PEP 668 保护，需先建虚拟环境
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[web]"          # 安装包与可选依赖（Flask）
+mot-web                          # 或：python3 -m mot --web
+# 浏览器打开 http://127.0.0.1:8000
+```
+
+| 输入源 | 用法 |
+| --- | --- |
+| 本机摄像头 | 类型选「本机摄像头」，填索引（如 `0`） |
+| RTSP / IP 网络流 | 类型选「网络流」，填 `rtsp://user:pass@host:554/stream`（断流自动重连） |
+| 上传视频 | 点「上传视频」；或类型选「本地视频路径」填绝对路径 |
+| 浏览器摄像头 | 点「使用浏览器摄像头」（需授权，约 8 fps 回传至服务端） |
+
+每张卡片在**停止后**会出现「重启」与「删除」按钮：重启沿用原输入源（同一 ID，产物另写
+新文件）；删除只移除页面条目，已生成的 CSV/JSONL 保留。开启 `--motion` 启动 `mot-web`
+后，会话无需种子框即可自动发现移动目标。
+
+> 没有检测器时，请用**种子框**或在实时画面上**拖拽框选**目标（下一帧生效）——否则画面里不会产生任何目标。
+
+HTTP API（同源，便于脚本与二次开发）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/` | 监测页面 |
+| GET | `/api/sources` | 支持的输入源类型 / 跟踪器后端 / 会话上限 |
+| POST | `/api/sessions` | 启动会话：`{"kind":"usb\|url\|file\|browser","spec":...,"seed_boxes":[[x,y,w,h]]}` |
+| GET | `/api/sessions` | 列出全部会话与实时统计 |
+| GET | `/api/sessions/<id>` | 单会话状态 + 统计 |
+| POST | `/api/sessions/<id>/stop` | 停止会话 |
+| POST | `/api/sessions/<id>/restart` | 重启**已停止**的会话（沿用原输入源与种子框；运行中返回 409） |
+| DELETE | `/api/sessions/<id>` | 删除**已停止**的会话（运行中返回 409） |
+| POST | `/api/sessions/<id>/box` | 入队手工目标框：`{"bbox":[x,y,w,h]}` |
+| POST | `/api/sessions/<id>/frame` | 浏览器摄像头推 JPEG 帧（body 为 JPEG） |
+| GET | `/api/sessions/<id>/events` | 最近事件（`?since=N`） |
+| GET | `/stream/<id>.mjpeg` | MJPEG 实时画面 |
+| POST | `/api/upload` | 上传视频（multipart `file`），成功后自动建会话 |
+
+产物：每路会话写 `outputs/web_<id>.csv`（轨迹）与 `outputs/web_<id>.jsonl`（事件），并同时打控制台日志。
+
+配置见 [`configs/default.yaml`](configs/default.yaml) 的 `web:` 段（`host` / `port` / `max_sessions` / `stream_fps` / `upload_dir` / `max_upload_bytes`），可用 `--web-host` / `--web-port` 覆盖。
+
+> 安全：仅供本机 / 局域网使用，**无多用户与鉴权**，默认只监听 `127.0.0.1`；需要局域网访问时用 `--web-host 0.0.0.0`，并自行做好网络隔离。上传仅接受视频扩展名，且限制单文件大小。
+
+## 自动运动检测
+
+不提供模型权重也能自动发现移动物体：基于 MOG2 背景建模 + 形态学 + 多重过滤，输出
+包围框交给现有跟踪器维护 ID 与轨迹。
+
+```bash
+# 摄像头：自动检测移动物体
+python3 -m mot --source 0 --motion
+
+# 视频文件 + 尺寸标定（每米 120 像素 → 框上显示实际尺寸与大小分级）
+python3 -m mot --source clip.mp4 --motion --motion-ppm 120
+
+# 调灵敏度：越小越敏感；min-area / min-size 控制最小目标
+python3 -m mot --source 0 --motion --motion-sensitivity 10 --motion-min-area 400 --motion-min-size 12
+```
+
+**过滤逻辑**（排除静态物体与噪点）
+
+| 过滤 | 参数 | 作用 |
+| --- | --- | --- |
+| 背景建模 | `var_threshold` | 与背景一致的内容不产生前景（静止物体天然被忽略） |
+| 最小面积 | `min_area_px` | 去掉小噪点 |
+| 最小边长 | `min_width_px` / `min_height_px` | 去掉细长纹理 |
+| 最大占比 | `max_area_ratio` | 去掉整屏光照突变 |
+| 填充率 | `min_fill_ratio` | 去掉中空、破碎的局部特征（`0` 关闭） |
+| 碎片合并 | `merge_iou` / `merge_gap_px` | 同一物体的多个局部框合并为覆盖整体的外接框 |
+| NMS | `nms_iou` / `nms_containment` | 抑制重叠框与被整体框包含的局部框 |
+| 连续命中 | `min_consecutive` | 单帧闪烁不入管道 |
+| 位移门限 | `min_motion_px` | 中心位移不足视为静止，不输出 |
+
+**颗粒度与稳定性**：默认只合并 IoU ≥ 0.15 的重叠碎片（`merge_gap_px=0` 关闭间隙合并），
+因此一个物体只会得到**一个完整框**；有间隙的相邻物体保持各自独立的框与 ID。若目标被
+1~2px 的噪声线切成两块，可用 `--motion-merge-gap 2` 修复。检测框抖动明显时可加
+`--box-smoothing 0.5`（EMA，`1` 表示不平滑）。
+
+**实际尺寸**：给出标定 `pixels_per_meter`（现场用已知尺寸参考物换算）后，每个框的标签
+会显示如 `0.42x0.55m medium`（`small` ≤ 0.5 m，`large` ≥ 2.0 m，阈值可配）；未标定时
+显示像素尺寸 `50x60px`。尺寸换算为纯函数 `mot.domain.sizing`，可独立复用。
+
+> 背景建模只能看到“与背景不同”的区域：预热期内已经在移动的物体可能被学成背景。
+> 实际部署时让 `warmup_frames`（默认 20 次检测调用）覆盖场景相对静止的起始阶段，或先
+> 启动服务再让目标进入画面。
+
+**帧率实测**（640×480、两目标、含绘制与 JPEG 编码）：
+
+| 后端 | 每帧检测 | 每 2 帧检测 |
+| --- | --- | --- |
+| KCF | 41.6 fps | 52.8 fps |
+| CSRT | 31.4 fps | 32.5 fps |
+
+均高于 25 fps；纯运动检测约 320 fps，瓶颈在跟踪器。低配机器优先 `--tracker kcf`，
+并适当增大 `--motion-interval`。
 
 ## 交互按键
 

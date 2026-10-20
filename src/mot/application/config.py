@@ -106,6 +106,8 @@ class TrackingConfig:
     trail_length: int = 120
     match_method: str = "greedy"
     max_tracks: int = 256
+    #: 框平滑系数（EMA alpha）：``1`` 表示不平滑（直接用检测框），越小框越稳但越滞后。
+    box_smoothing: float = 1.0
 
     def validate(self) -> None:
         self.backend = _translated(
@@ -127,6 +129,9 @@ class TrackingConfig:
             raise ConfigError(
                 f"tracking.match_method must be one of {MATCH_METHODS}, got {self.match_method!r}"
             )
+        self.box_smoothing = _as_float(
+            self.box_smoothing, "tracking.box_smoothing", 1e-6, 1.0
+        )
 
 
 @dataclass
@@ -230,14 +235,118 @@ class SourceConfig:
 
 
 @dataclass
+class MotionConfig:
+    """自动运动检测配置（无需检测器权重，基于背景建模）。
+
+    关键调参项：
+        * ``var_threshold``：灵敏度，越小越敏感；
+        * ``min_area_px`` / ``min_width_px`` / ``min_height_px``：最小目标尺寸阈值；
+        * ``min_motion_px``：位移门限，用于排除静止物体；
+        * ``min_consecutive``：连续命中帧数，用于抑制噪点；
+        * ``min_fill_ratio``：轮廓填充率下限，剔中空/破碎的局部特征；
+        * ``merge_iou`` / ``merge_gap_px``：同一物体碎片框的合并条件（间隙默认 0，
+          只合并重叠/相接的框，避免误合并相邻物体）；
+        * ``nms_iou`` / ``nms_containment``：抑制被整体框包含的局部框；
+        * ``pixels_per_meter``：尺寸标定（每米像素），用于换算实际尺寸。
+    """
+
+    enabled: bool = False
+    history: int = 200
+    var_threshold: float = 16.0
+    learning_rate: float = 0.0
+    warmup_frames: int = 20
+    warmup_rate: float = 0.05
+    min_area_px: float = 200.0
+    min_width_px: int = 8
+    min_height_px: int = 8
+    max_area_ratio: float = 0.6
+    min_fill_ratio: float = 0.0
+    merge_iou: float = 0.15
+    merge_gap_px: float = 0.0
+    nms_iou: float = 0.6
+    nms_containment: float = 0.8
+    min_consecutive: int = 2
+    min_motion_px: float = 6.0
+    morph_kernel: int = 3
+    interval: int = 2
+    pixels_per_meter: Optional[float] = None
+    small_max_m: float = 0.5
+    large_min_m: float = 2.0
+
+    def validate(self) -> None:
+        self.enabled = _require_bool(self.enabled, "motion.enabled")
+        self.history = _as_int(self.history, "motion.history", 1, 100_000)
+        self.var_threshold = _as_float(self.var_threshold, "motion.var_threshold", 1e-6, 255.0)
+        self.learning_rate = _as_float(self.learning_rate, "motion.learning_rate", 0.0, 1.0)
+        self.warmup_frames = _as_int(self.warmup_frames, "motion.warmup_frames", 0, 100_000)
+        self.warmup_rate = _as_float(self.warmup_rate, "motion.warmup_rate", 1e-6, 1.0)
+        self.min_area_px = _as_float(self.min_area_px, "motion.min_area_px", 0.0, 1e9)
+        self.min_width_px = _as_int(self.min_width_px, "motion.min_width_px", 1, 100_000)
+        self.min_height_px = _as_int(self.min_height_px, "motion.min_height_px", 1, 100_000)
+        self.max_area_ratio = _as_float(self.max_area_ratio, "motion.max_area_ratio", 1e-6, 1.0)
+        self.min_fill_ratio = _as_float(self.min_fill_ratio, "motion.min_fill_ratio", 0.0, 1.0)
+        self.merge_iou = _as_float(self.merge_iou, "motion.merge_iou", 0.0, 1.0)
+        self.merge_gap_px = _as_float(self.merge_gap_px, "motion.merge_gap_px", 0.0, 1e9)
+        self.nms_iou = _as_float(self.nms_iou, "motion.nms_iou", 0.0, 1.0)
+        self.nms_containment = _as_float(
+            self.nms_containment, "motion.nms_containment", 1e-6, 1.0
+        )
+        self.min_consecutive = _as_int(self.min_consecutive, "motion.min_consecutive", 1, 1000)
+        self.min_motion_px = _as_float(self.min_motion_px, "motion.min_motion_px", 0.0, 100_000.0)
+        self.morph_kernel = _as_int(self.morph_kernel, "motion.morph_kernel", 1, 99)
+        self.interval = _as_int(self.interval, "motion.interval", 1, 1000)
+        if self.pixels_per_meter is not None:
+            self.pixels_per_meter = _as_float(
+                self.pixels_per_meter, "motion.pixels_per_meter", 1e-6, 1e9
+            )
+        self.small_max_m = _as_float(self.small_max_m, "motion.small_max_m", 1e-6, 1e6)
+        self.large_min_m = _as_float(self.large_min_m, "motion.large_min_m", 1e-6, 1e6)
+        if self.large_min_m <= self.small_max_m:
+            raise ConfigError(
+                "motion.large_min_m must be greater than motion.small_max_m, "
+                f"got small_max_m={self.small_max_m}, large_min_m={self.large_min_m}"
+            )
+
+
+@dataclass
+class WebConfig:
+    """本地 Web 监测界面配置（默认仅监听本机）。"""
+
+    host: str = "127.0.0.1"
+    port: int = 8000
+    max_sessions: int = 4
+    stream_fps: float = 15.0
+    upload_dir: Optional[str] = None
+    max_upload_bytes: int = 2_000_000_000
+
+    def validate(self) -> None:
+        if not str(self.host).strip():
+            raise ConfigError("web.host must not be empty")
+        self.host = str(self.host).strip()
+        self.port = _as_int(self.port, "web.port", 1, 65535)
+        self.max_sessions = _as_int(self.max_sessions, "web.max_sessions", 1, 64)
+        self.stream_fps = _as_float(self.stream_fps, "web.stream_fps", 1.0, 60.0)
+        if self.upload_dir is not None:
+            text = str(self.upload_dir).strip()
+            if not text:
+                raise ConfigError("web.upload_dir must be null or a non-empty path")
+            self.upload_dir = text
+        self.max_upload_bytes = _as_int(
+            self.max_upload_bytes, "web.max_upload_bytes", 1, 100_000_000_000
+        )
+
+
+@dataclass
 class AppConfig:
     """顶层配置对象。"""
 
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     detector: DetectorConfig = field(default_factory=DetectorConfig)
+    motion: MotionConfig = field(default_factory=MotionConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     source: SourceConfig = field(default_factory=SourceConfig)
+    web: WebConfig = field(default_factory=WebConfig)
 
     @classmethod
     def defaults(cls) -> "AppConfig":
@@ -283,9 +392,11 @@ class AppConfig:
         sections: Dict[str, Any] = {
             "tracking": config.tracking,
             "detector": config.detector,
+            "motion": config.motion,
             "display": config.display,
             "output": config.output,
             "source": config.source,
+            "web": config.web,
         }
         unknown_sections = set(data) - set(sections)
         if unknown_sections:
@@ -314,9 +425,11 @@ class AppConfig:
     def validate(self) -> None:
         self.tracking.validate()
         self.detector.validate()
+        self.motion.validate()
         self.display.validate()
         self.output.validate()
         self.source.validate()
+        self.web.validate()
 
     def to_dict(self) -> Dict[str, Any]:
         def as_dict(obj: Any) -> Dict[str, Any]:
@@ -329,9 +442,11 @@ class AppConfig:
         return {
             "tracking": as_dict(self.tracking),
             "detector": as_dict(self.detector),
+            "motion": as_dict(self.motion),
             "display": as_dict(self.display),
             "output": as_dict(self.output),
             "source": as_dict(self.source),
+            "web": as_dict(self.web),
         }
 
     def describe(self) -> Tuple[str, ...]:
@@ -354,7 +469,9 @@ __all__ = [
     "ConfigError",
     "DetectorConfig",
     "DisplayConfig",
+    "MotionConfig",
     "OutputConfig",
     "SourceConfig",
     "TrackingConfig",
+    "WebConfig",
 ]

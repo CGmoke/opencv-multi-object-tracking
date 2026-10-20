@@ -125,6 +125,62 @@ class TestBuildConfig:
         assert config.detector.interval == 5
         assert config.detector.confidence == 0.6
 
+    def test_motion_flags(self):
+        args = build_parser().parse_args(
+            [
+                "--motion",
+                "--motion-sensitivity",
+                "10",
+                "--motion-min-area",
+                "300",
+                "--motion-min-size",
+                "12",
+                "--motion-min-motion",
+                "8",
+                "--motion-min-consecutive",
+                "3",
+                "--motion-interval",
+                "4",
+                "--motion-ppm",
+                "120",
+            ]
+        )
+        config = build_config(args)
+        assert config.motion.enabled is True
+        assert config.motion.var_threshold == 10
+        assert config.motion.min_area_px == 300
+        assert (config.motion.min_width_px, config.motion.min_height_px) == (12, 12)
+        assert config.motion.min_motion_px == 8
+        assert config.motion.min_consecutive == 3
+        assert config.motion.interval == 4
+        assert config.motion.pixels_per_meter == 120
+
+    def test_motion_box_merge_and_nms_flags(self):
+        args = build_parser().parse_args(
+            [
+                "--motion",
+                "--motion-min-fill",
+                "0.25",
+                "--motion-merge-iou",
+                "0.2",
+                "--motion-merge-gap",
+                "2",
+                "--motion-nms-iou",
+                "0.5",
+                "--motion-nms-containment",
+                "0.7",
+                "--box-smoothing",
+                "0.4",
+            ]
+        )
+        config = build_config(args)
+        assert config.motion.min_fill_ratio == 0.25
+        assert config.motion.merge_iou == 0.2
+        assert config.motion.merge_gap_px == 2
+        assert config.motion.nms_iou == 0.5
+        assert config.motion.nms_containment == 0.7
+        assert config.tracking.box_smoothing == 0.4
+
     def test_config_file_is_overridden_by_cli(self, tmp_path):
         config_file = tmp_path / "config.yaml"
         config_file.write_text("tracking:\n  backend: kcf\n  max_missing: 9\n", encoding="utf-8")
@@ -162,6 +218,7 @@ class TestMainEntryPoints:
         assert "tracking:" in out
         assert "backend: csrt" in out
         assert "detector:" in out
+        assert "motion:" in out
 
     def test_list_trackers(self, capsys):
         assert main(["--list-trackers"]) == 0
@@ -273,3 +330,44 @@ class TestEndToEnd:
         assert code == 0
         assert video_path.exists()
         assert video_path.stat().st_size > 0
+
+    def test_motion_auto_detects_the_moving_square(self, tmp_path):
+        """开启运动检测后，无需种子框即可自动发现并跟踪移动方块。"""
+        require_csrt()
+        video_path = tmp_path / "still_then_move.mp4"
+        writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 20.0, (160, 120))
+        if not writer.isOpened():
+            pytest.skip("no mp4v writer available in this OpenCV build")
+        for _ in range(40):  # 先静止 40 帧：interval=2 时对应 20 次检测调用
+            writer.write(np.zeros((120, 160, 3), dtype=np.uint8))
+        for index in range(20):  # 随后方块开始移动
+            frame = np.zeros((120, 160, 3), dtype=np.uint8)
+            x = 20 + 4 * index
+            cv2.rectangle(frame, (x, 40), (x + 39, 79), (255, 255, 255), -1)
+            writer.write(frame)
+        writer.release()
+
+        config_path = tmp_path / "motion.yaml"
+        config_path.write_text(
+            "motion:\n  enabled: true\n  warmup_frames: 20\n  interval: 2\n  min_motion_px: 4\n",
+            encoding="utf-8",
+        )
+        csv_path = tmp_path / "out" / "traj.csv"
+        code = main(
+            [
+                "--config",
+                str(config_path),
+                "--source",
+                str(video_path),
+                "--no-display",
+                "--csv",
+                str(csv_path),
+            ]
+        )
+        assert code == 0
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        assert rows, "motion detector should have tracked the moving square"
+        widths = [float(row["w"]) for row in rows]
+        assert 20 <= min(widths) and max(widths) <= 90  # 既不是窄条也不是整屏
+        assert {row["track_id"] for row in rows} == {"1"}

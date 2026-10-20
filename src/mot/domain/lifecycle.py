@@ -66,6 +66,8 @@ class TrackManager:
         id_allocator: 可选共享分配器；id 单调递增。
         max_tracks: 同时存活 id 的硬上限；超限的检测被拒绝（计入 ``spawn_failures``）
             而非无限增长内存。
+        box_smoothing: 检测框 EMA 平滑系数（``0 < alpha <= 1``）。``1`` 表示直接使用
+            检测框；调小可抑制检测框抖动，但会带来轻微滞后。仅在用检测重锚时生效。
     """
 
     def __init__(
@@ -80,12 +82,19 @@ class TrackManager:
         match_method: str = "greedy",
         id_allocator: Optional[IdAllocator] = None,
         max_tracks: int = 256,
+        box_smoothing: float = 1.0,
     ) -> None:
         if match_method not in MATCH_METHODS:
             raise ValidationError(
                 f"unknown match_method {match_method!r}; expected {MATCH_METHODS}",
                 field="match_method",
                 value=match_method,
+            )
+        if not 0.0 < float(box_smoothing) <= 1.0:
+            raise ValidationError(
+                f"box_smoothing must be within (0, 1], got {box_smoothing}",
+                field="box_smoothing",
+                value=box_smoothing,
             )
 
         self._tracker_factory = tracker_factory
@@ -96,6 +105,7 @@ class TrackManager:
         self.trail_length = validate_trail_length(trail_length)
         self.match_method = match_method
         self.max_tracks = validate_max_tracks(max_tracks)
+        self.box_smoothing = float(box_smoothing)
         self._capacity_warned = False
         self._allocator = id_allocator or IdAllocator()
         self._tracks: Dict[int, TrackedObject] = {}
@@ -279,18 +289,32 @@ class TrackManager:
             ``True`` 表示刷新成功；``False`` 表示初始化失败（已降级为一次 miss
             并转为 ``LOST``，异常不外泄）。
         """
+        box = self._smooth_box(track, detection.bbox)
         try:
-            self._init_fn(track.tracker, frame, detection.bbox)
+            self._init_fn(track.tracker, frame, box)
         except Exception as exc:  # noqa: BLE001 - 非致命：单次重锚失败不得中断主循环
             LOGGER.warning("re-init failed for id %s: %s", track.track_id, exc)
             track.misses += 1
             track.state = TrackState.LOST
             return False
-        track.bbox = detection.bbox
+        track.bbox = box
         track.label = detection.label
         track.confidence = detection.confidence
-        track.push_trail(bbox_center(detection.bbox), self.trail_length)
+        track.push_trail(bbox_center(box), self.trail_length)
         return True
+
+    def _smooth_box(self, track: TrackedObject, box: BBox) -> BBox:
+        """检测框 EMA 平滑；LOST 目标重新出现时直接吸附，避免“缓慢追框”。"""
+        alpha = self.box_smoothing
+        if alpha >= 1.0 or track.state is TrackState.LOST:
+            return box
+        previous = track.bbox
+        return (
+            alpha * box[0] + (1.0 - alpha) * previous[0],
+            alpha * box[1] + (1.0 - alpha) * previous[1],
+            alpha * box[2] + (1.0 - alpha) * previous[2],
+            alpha * box[3] + (1.0 - alpha) * previous[3],
+        )
 
     def _spawn(
         self, detection: Detection, frame: Frame, frame_index: int

@@ -1,0 +1,37 @@
+/* OpenCV MOT 实时监测界面样式 */
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #0e1116;
+  color: #e6edf3;
+}
+header { padding: 16px 20px; border-bottom: 1px solid #232a33; }
+h1 { margin: 0 0 12px; font-size: 18px; font-weight: 600; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+form { display: flex; gap: 8px; }
+input, select, button {
+  background: #161b22; color: #e6edf3; border: 1px solid #30363d;
+  border-radius: 6px; padding: 6px 10px; font-size: 13px;
+}
+input { min-width: 260px; }
+button { cursor: pointer; }
+button:hover { background: #21262d; }
+.notice { min-height: 18px; margin: 8px 0 0; font-size: 13px; color: #f0b72f; }
+#grid {
+  display: grid; gap: 14px; padding: 16px 20px;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+}
+.card { background: #161b22; border: 1px solid #232a33; border-radius: 10px; overflow: hidden; }
+.card-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 13px; }
+.card-head .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-head .state { margin-left: auto; text-transform: uppercase; font-size: 11px; color: #7d8590; }
+.card-head .stop { padding: 3px 8px; font-size: 12px; }
+.preview { display: block; width: 100%; background: #000; aspect-ratio: 4 / 3; object-fit: contain; }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 10px; margin: 0; padding: 10px 12px; font-size: 12px; }
+.stats dt { color: #7d8590; }
+.stats dd { margin: 0 0 4px; }
+.paths { padding: 0 12px 10px; font-size: 11px; color: #7d8590; word-break: break-all; }
+.hint { padding: 0 12px 6px; font-size: 11px; color: #7d8590; }
+.error { padding: 0 12px 10px; font-size: 12px; color: #ff7b72; }

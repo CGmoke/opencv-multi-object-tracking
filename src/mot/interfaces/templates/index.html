@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenCV MOT · 实时监测</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>OpenCV 多目标跟踪 · 实时监测</h1>
+    <div class="controls">
+      <form id="add-form">
+        <select id="kind" aria-label="输入源类型">
+          <option value="usb">本机摄像头</option>
+          <option value="url">网络流 (RTSP / HTTP)</option>
+          <option value="file">本地视频路径</option>
+        </select>
+        <input id="spec" placeholder="0 / rtsp://host/stream / path/to/video.mp4">
+        <input id="seeds" placeholder="种子框 x,y,w,h（多组用 ; 分隔，可留空）">
+        <button type="submit">启动</button>
+      </form>
+      <form id="upload-form">
+        <input id="file" type="file" accept="video/mp4,video/x-msvideo,video/quicktime,.mkv,.webm">
+        <button type="submit">上传视频</button>
+      </form>
+      <button id="browser-cam" type="button">使用浏览器摄像头</button>
+    </div>
+    <p id="notice" class="notice"></p>
+  </header>
+
+  <main id="grid"></main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from mot.domain.models import BBox, Point, TrackedObject
+from mot.domain.sizing import format_size
 
 Color = Tuple[int, int, int]
 
@@ -113,8 +114,15 @@ def draw_tracks(
     show_labels: bool = True,
     show_lost: bool = True,
     fade: bool = True,
+    pixels_per_meter: Optional[float] = None,
+    small_max_m: float = 0.5,
+    large_min_m: float = 2.0,
 ) -> np.ndarray:
-    """为每个目标绘制框、id 与轨迹。"""
+    """为每个目标绘制框、id、轨迹，以及（可选）实际尺寸。
+
+    ``pixels_per_meter`` 给定时，标签后附加如 ``0.42x0.55m medium`` 的实际尺寸；
+    未给定时显示像素尺寸 ``50x60px``，便于在未标定的场景下调阈值。
+    """
     thickness = thickness_for(frame)
     for track in tracks:
         if not track.is_active and not show_lost:
@@ -124,12 +132,15 @@ def draw_tracks(
             color = scale_color(color, 0.45)
         if show_trails and track.trail:
             draw_trail(frame, track.trail, color, thickness=max(1, thickness - 1), fade=fade)
+        label = f"{track.track_id} {track.label}"
+        if show_labels:
+            label = f"{label} {format_size(track.bbox, pixels_per_meter, small_max=small_max_m, large_min=large_min_m)}"
         draw_box(
             frame,
             track.bbox,
             color,
             thickness=thickness,
-            label=f"{track.track_id} {track.label}",
+            label=label,
             score=track.confidence,
             show_label=show_labels,
         )

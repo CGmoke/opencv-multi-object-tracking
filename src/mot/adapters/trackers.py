@@ -29,7 +29,12 @@ BACKEND_NOTES: Dict[str, str] = {
 
 
 def _candidate_factories(name: str) -> List[Tuple[str, Callable[[], Any]]]:
-    """返回 ``(描述, 工厂)`` 列表，越具体的入口越靠前。"""
+    """返回 ``(描述, 工厂)`` 列表，越具体的入口越靠前。
+
+    顺序上 **legacy 优先**：OpenCV 5.0.0 的 ``cv2.TrackerX_create`` 新实现在
+    “运动检测 + 大量实例创建/销毁”的负载下会出现堆损坏（进程崩溃），而
+    ``cv2.legacy.TrackerX_create`` 稳定；旧构建若没有 ``cv2.legacy`` 会自动回退到新实现。
+    """
     short = name.upper()
     candidates: List[Tuple[str, Callable[[], Any]]] = []
     try:
@@ -40,13 +45,13 @@ def _candidate_factories(name: str) -> List[Tuple[str, Callable[[], Any]]]:
             "is not part of plain opencv-python)."
         ) from exc
 
-    modern = getattr(cv2, f"Tracker{short}_create", None)
-    if callable(modern):
-        candidates.append((f"cv2.Tracker{short}_create", modern))
-
     legacy = getattr(getattr(cv2, "legacy", None), f"Tracker{short}_create", None)
     if callable(legacy):
         candidates.append((f"cv2.legacy.Tracker{short}_create", legacy))
+
+    modern = getattr(cv2, f"Tracker{short}_create", None)
+    if callable(modern):
+        candidates.append((f"cv2.Tracker{short}_create", modern))
 
     # 某些构建只暴露类，例如 cv2.TrackerCSRT.create()。
     cls = getattr(cv2, f"Tracker{short}", None)

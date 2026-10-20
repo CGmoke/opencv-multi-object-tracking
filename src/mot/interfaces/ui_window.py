@@ -105,6 +105,9 @@ class WindowRenderer:
         show_labels: bool = True,
         show_hud: bool = True,
         trail_fade: bool = True,
+        pixels_per_meter: Optional[float] = None,
+        small_max_m: float = 0.5,
+        large_min_m: float = 2.0,
         show_display: bool = True,
         video_sink: Optional[VideoWriterSink] = None,
         snapshot_dir: str = "outputs/snapshots",
@@ -119,6 +122,9 @@ class WindowRenderer:
         self._show_labels = show_labels
         self._show_hud = show_hud
         self._trail_fade = trail_fade
+        self._pixels_per_meter = pixels_per_meter
+        self._small_max_m = float(small_max_m)
+        self._large_min_m = float(large_min_m)
         self._show_display = show_display
         self._video_sink = video_sink
         self._snapshot_dir = snapshot_dir
@@ -153,6 +159,9 @@ class WindowRenderer:
             show_trails=self._show_trails,
             show_labels=self._show_labels,
             fade=self._trail_fade,
+            pixels_per_meter=self._pixels_per_meter,
+            small_max_m=self._small_max_m,
+            large_min_m=self._large_min_m,
         )
         drag = self._ui.drag_box
         if drag is not None:

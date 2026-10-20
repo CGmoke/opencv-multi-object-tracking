@@ -14,7 +14,13 @@ cv2 = pytest.importorskip("cv2")
 import numpy as np
 
 from mot.adapters.sinks.video import VideoWriterSink
-from mot.adapters.sources import VideoSource, resolve_source
+from mot.adapters.sources import (
+    UrlSource,
+    VideoSource,
+    is_url,
+    open_source,
+    resolve_source,
+)
 from mot.domain.errors import SinkError, SourceError
 
 
@@ -111,3 +117,116 @@ class TestVideoWriterSink:
     def test_directory_target_is_rejected(self, tmp_path):
         with pytest.raises(SinkError, match="directory"):
             VideoWriterSink(str(tmp_path), 20.0, (160, 120))
+
+
+class _FakeCapture:
+    """最小 ``cv2.VideoCapture`` 替身：按脚本返回帧，帧用尽即“断流”。"""
+
+    def __init__(self, frames=()) -> None:
+        self._frames = list(frames)
+        self._index = 0
+        self.released = False
+
+    def isOpened(self) -> bool:
+        return True
+
+    def read(self):
+        if self._index >= len(self._frames):
+            return False, None
+        frame = self._frames[self._index]
+        self._index += 1
+        return True, frame
+
+    def release(self) -> None:
+        self.released = True
+
+
+class _ClosedCapture:
+    """打不开的 capture 替身。"""
+
+    def isOpened(self) -> bool:
+        return False
+
+    def release(self) -> None:
+        pass
+
+
+class _CaptureFactory:
+    """逐个返回 capture；第 ``open_fail_at`` 次起返回“打不开”。"""
+
+    def __init__(self, frames=(), open_fail_at=None) -> None:
+        self._frames = frames
+        self._open_fail_at = open_fail_at
+        self.calls = 0
+        self.captures = []
+
+    def __call__(self, spec):
+        self.calls += 1
+        if self._open_fail_at is not None and self.calls >= self._open_fail_at:
+            return _ClosedCapture()
+        capture = _FakeCapture(self._frames)
+        self.captures.append(capture)
+        return capture
+
+
+class TestUrlRouting:
+    def test_url_is_passed_through_untouched(self):
+        assert resolve_source("rtsp://cam/stream") == "rtsp://cam/stream"
+        assert resolve_source("http://host/v.mp4") == "http://host/v.mp4"
+
+    @pytest.mark.parametrize(
+        "spec", ["rtsp://a", "RTSP://A", "rtmp://a", "https://a", "udp://a", "tcp://a"]
+    )
+    def test_is_url_true(self, spec):
+        assert is_url(spec) is True
+
+    @pytest.mark.parametrize("spec", ["clip.mp4", "0", 0, None, "  "])
+    def test_is_url_false(self, spec):
+        assert is_url(spec) is False
+
+    def test_open_source_dispatches_by_scheme(self, monkeypatch, sample_video):
+        factory = _CaptureFactory([])
+        monkeypatch.setattr(cv2, "VideoCapture", factory)
+        assert isinstance(open_source("rtsp://cam/stream"), UrlSource)
+        assert isinstance(open_source(str(sample_video)), VideoSource)
+
+
+class TestUrlSource:
+    def test_reads_frames_and_counts(self, monkeypatch):
+        frame = np.zeros((4, 4, 3), dtype=np.uint8)
+        monkeypatch.setattr(cv2, "VideoCapture", _CaptureFactory([frame, frame]))
+        source = UrlSource("rtsp://cam/stream", backoff=0.0)
+        ok, got = source.read()
+        assert ok is True and got is frame
+        assert source.read()[0] is True
+        assert source.frames_read == 2
+        assert source.read()[0] is False  # 帧用尽
+        assert source.name == "rtsp://cam/stream"
+        source.release()
+
+    def test_reconnects_after_a_drop(self, monkeypatch):
+        frame = np.zeros((4, 4, 3), dtype=np.uint8)
+        factory = _CaptureFactory([frame])  # 每个新 capture 只有 1 帧
+        monkeypatch.setattr(cv2, "VideoCapture", factory)
+        source = UrlSource("rtsp://cam/stream", max_retries=2, backoff=0.0)
+        assert source.read()[0] is True  # 首帧
+        assert source.read()[0] is False  # 断流
+        assert source.read()[0] is True  # 重连成功后再读一帧
+        assert factory.calls >= 2
+        source.release()
+
+    def test_gives_up_after_max_retries(self, monkeypatch):
+        factory = _CaptureFactory([], open_fail_at=2)
+        monkeypatch.setattr(cv2, "VideoCapture", factory)
+        source = UrlSource("rtsp://cam/stream", max_retries=2, backoff=0.0)
+        assert source.read()[0] is False  # 首帧即失败
+        assert source.read()[0] is False  # 第 1 次重连失败
+        assert source.read()[0] is False  # 第 2 次重连失败 = 达上限
+        assert factory.calls == 3  # 初次打开 + 2 次重连
+        assert source.read()[0] is False  # 已放弃，不再重连
+        assert factory.calls == 3
+        source.release()
+
+    def test_rejects_non_url(self):
+        with pytest.raises(SourceError, match="not a network stream"):
+            UrlSource("clip.mp4")

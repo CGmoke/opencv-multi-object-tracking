@@ -41,11 +41,14 @@ dependencies = [
 [project.optional-dependencies]
 hungarian = ["scipy>=1.8"]
 detect = ["ultralytics>=8.0"]
+web = ["flask>=3"]
 dev = ["pytest>=7", "ruff>=0.4"]
 
 [project.scripts]
 # 组合根：接口层 CLI（见 docs/ARCHITECTURE_DESIGN.md §3.4，落地于步骤 E22）
 mot-track = "mot.interfaces.cli:main"
+# 组合根：本地 Web 监测界面（需要可选 extra：pip install -e ".[web]"）
+mot-web = "mot.interfaces.web:main"
 
 [project.urls]
 Homepage = "https://github.com/CGmoke/opencv-multi-object-tracking"
@@ -59,7 +62,12 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-mot = ["py.typed"]
+mot = [
+    "py.typed",
+    # Web 界面模板与静态资源（打包后 mot-web 才能渲染页面）
+    "interfaces/templates/*.html",
+    "interfaces/static/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
