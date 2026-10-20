@@ -9,7 +9,7 @@
 
 仓库定位是**教学与二次开发骨架**：依赖少、分层清楚、核心逻辑可脱离 OpenCV 单测。它不是生产级 MOT 系统（没有 ReID、卡尔曼滤波，也没有内置检测器驱动）。
 
-> 状态：`v0.2.0`（alpha）。仓库框架、参考实现与测试已就位；真实摄像头、GUI 交互与扩展方向见 [已知限制](#已知限制) 与 [ROADMAP](docs/ROADMAP.md)。
+> 状态：`v0.2.0`（alpha）。仓库框架、参考实现与测试已就位；真实摄像头、GUI 交互与扩展方向见 [已知限制](#已知限制)。
 
 ---
 
@@ -51,9 +51,6 @@
 .
 ├── configs/
 │   └── default.yaml            # 完整配置示例（含注释）
-├── docs/
-│   ├── ARCHITECTURE.md         # 分层、数据流、ID 生命周期、设计决策
-│   └── ROADMAP.md              # 里程碑与已知问题
 ├── src/mot/
 │   ├── __init__.py             # 公开 API
 │   ├── __main__.py             # python -m mot 入口
@@ -90,8 +87,8 @@
 git clone https://github.com/CGmoke/opencv-multi-object-tracking.git
 cd opencv-multi-object-tracking
 
-python -m venv .venv
-source .venv/bin/activate
+python -m venv <venv-dir>
+source <venv-dir>/bin/activate   # Windows: <venv-dir>\Scripts\activate
 pip install -e ".[dev]"          # 或：pip install -r requirements-dev.txt
 ```
 
@@ -110,14 +107,14 @@ mot-track --source 0
 用视频文件跑，并在第一帧用给定框初始化一个目标：
 
 ```bash
-mot-track --source demo.mp4 --seed-box 120,80,60,140 --csv outputs/trails.csv
+mot-track --source demo.mp4 --seed-box 120,80,60,140 --csv trails.csv
 ```
 
 无界面 / 服务器上运行，只看统计结果：
 
 ```bash
 mot-track --source demo.mp4 --seed-box 120,80,60,140 \
-          --no-display --csv outputs/trails.csv --max-frames 200
+          --no-display --csv trails.csv --max-frames 200
 ```
 
 查看合并 CLI 覆盖后的最终配置：
@@ -151,6 +148,8 @@ mot-track --dump-config --iou-threshold 0.4 --tracker kcf
 
 退出码：`0` 正常，`1` 未读取到任何帧，`2` 参数 / 配置 / 跟踪器 / 输入输出错误，`130` 被 `Ctrl-C` 中断。
 
+轨迹 CSV、录像与截图等运行时产物默认写入仓库内的产物目录（已被 `.gitignore` 忽略，不会上传），上表中出现的默认路径只描述程序行为，不是仓库内容。
+
 ## 交互按键
 
 | 按键 | 作用 |
@@ -161,7 +160,7 @@ mot-track --dump-config --iou-threshold 0.4 --tracker kcf
 | `x` | 进入删除模式，点击目标将其删除（命中面积最小的目标） |
 | `c` | 清空所有轨迹线（保留目标） |
 | `r` | 重置会话（销毁所有目标，ID 计数继续） |
-| `s` | 保存当前帧截图到 `outputs/snapshots/`（同名自动加序号） |
+| `s` | 保存当前帧截图（写入默认输出目录，同名自动加序号） |
 | `h` | 显示 / 隐藏帮助 |
 
 新增与删除在暂停状态下同样可用，方便逐帧标注。
@@ -245,7 +244,7 @@ track_id,frame,timestamp,x,y,w,h,cx,cy,label
 - **ID 语义**：ID 单调自增、会话内不复用；目标丢失后保留 `max_missing` 帧供 IoU 恢复；同一位置的新目标拿到新 ID。
 - **同帧去重**：手工框与检测框使用同一个 IoU 阈值合并，避免“一物两 ID”。
 
-细节（状态机、匹配算法、设计取舍、性能热点）见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+细节（状态机、匹配算法、设计取舍、性能热点）见源码与 `tests/` 下的对应用例。
 
 ## 测试与 CI
 
@@ -269,7 +268,7 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 Ubuntu 上跑 
 | NumPy | 1.26.4 | >= 1.21 |
 | 平台 | Linux（无显示器，`--no-display`） | 跨平台，macOS/Windows 未实测 |
 
-跟踪器构造按 `cv2.TrackerX_create` → `cv2.legacy.TrackerX_create` → `cv2.TrackerX.create()` 的顺序回退，以兼容新旧 OpenCV 的 API 变动。GUI、真实摄像头与高版本 OpenCV 尚未在 CI 中验证，见 [ROADMAP](docs/ROADMAP.md)。
+跟踪器构造按 `cv2.TrackerX_create` → `cv2.legacy.TrackerX_create` → `cv2.TrackerX.create()` 的顺序回退，以兼容新旧 OpenCV 的 API 变动。GUI、真实摄像头与高版本 OpenCV 尚未在 CI 中验证。
 
 ## 扩展方向
 
@@ -281,7 +280,7 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 Ubuntu 上跑 
 ## 已知限制
 
 - 摄像头输入、真实视频与 GUI 交互未在 CI 中验证；本仓库的自动化证据来自合成视频。
-- `r` 重置后 `frame` 列从 1 重新计数，而 `track_id` 继续递增；把同一 CSV 按 `frame` 关联视频时需要留意（见 ROADMAP 的 A1）。
+- `r` 重置后 `frame` 列从 1 重新计数，而 `track_id` 继续递增；把同一 CSV 按 `frame` 关联视频时需要留意。
 - 时间戳基于 FPS 估算，假定恒定帧率；`--loop` 回绕后与真实时间脱钩。
 - `matched` 字段返回的是“当帧目标列表下标对”，不是 `track_id`。
 - `--loop` 且不指定 `--max-frames` 时会无限运行。

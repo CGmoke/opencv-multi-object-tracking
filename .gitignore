@@ -37,8 +37,6 @@ outputs/
 *.mp4
 *.avi
 *.mov
-!docs/**/*.png
-!docs/**/*.svg
 
 # Model weights (large, untrusted, licence-dependent)
 *.pt
@@ -57,3 +55,6 @@ Thumbs.db
 # Local config overrides
 configs/local.yaml
 .env
+
+docs/
+assets/

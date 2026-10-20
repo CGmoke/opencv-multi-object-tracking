@@ -30,6 +30,18 @@ tracking:
   # Hard cap on simultaneously live ids (memory guard).
   max_tracks: 256
 
+detector:
+  # Optional detector hook; "none" disables it (boxes then come from the mouse
+  # or --seed-box). "yolo" is reserved for the detector wiring milestone.
+  backend: none
+  # Local model path; null means "no model". Weights are never downloaded
+  # automatically (see docs/ROADMAP.md on the .pt code-execution risk).
+  model: null
+  confidence: 0.35
+  classes: []
+  # Run the detector every N frames; the first frame always runs it.
+  interval: 1
+
 display:
   enabled: true
   show_trails: true
