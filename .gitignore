@@ -51,10 +51,13 @@ yolov*.pt
 *.swp
 .DS_Store
 Thumbs.db
+.trae/
+
 
 # Local config overrides
 configs/local.yaml
 .env
 
+demo/
 docs/
 assets/
