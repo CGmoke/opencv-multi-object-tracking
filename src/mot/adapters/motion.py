@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Deque, List, Optional, Sequence, Tuple
@@ -41,6 +42,16 @@ from mot.domain.postprocess import merge_fragments, nms
 
 #: 支持的背景建模后端。
 BACKGROUND_METHODS: Tuple[str, ...] = ("mog2", "knn")
+
+#: 运动检测置信度的复合权重（shape / fill / persist / motion），集中在此便于调参。
+CONFIDENCE_WEIGHT_SHAPE = 0.5
+CONFIDENCE_WEIGHT_FILL = 0.3
+CONFIDENCE_WEIGHT_PERSIST = 0.1
+CONFIDENCE_WEIGHT_MOTION = 0.1
+
+#: 置信度输出范围的上下限（避免 0 分候选与完全饱和的 1.0）。
+CONFIDENCE_MIN = 0.05
+CONFIDENCE_MAX = 1.0
 
 
 @dataclass
@@ -78,6 +89,8 @@ class MotionDetector:
             帧的恢复期。``1.0`` 表示关闭该护栏。
         burst_recover_frames: 全局突变后用于重新适应背景的帧数（默认 ``3``）；
             恢复期内以 ``warmup_rate`` 更新背景，避免把突变后的亮度当成永久背景。
+        min_quality: 候选置信度下限（默认 ``0.45``）：低于该值的候选不输出。
+            置信度由形状/填充率/持续性/位移复合而成，不随框面积单调递增。
         blur_kernel: 高斯模糊核边长（奇数，默认 ``5``；``0`` 表示关闭）。在灰度图上
             平滑像素级高频噪声，避免传感器颗粒被背景模型判成前景。
         median_kernel: 中值滤波核边长（奇数，默认 ``0`` 关闭）。对椒盐/压缩噪点比高斯
@@ -133,6 +146,7 @@ class MotionDetector:
         max_area_ratio: float = 0.6,
         max_fg_ratio: float = 0.25,
         burst_recover_frames: int = 3,
+        min_quality: float = 0.45,
         blur_kernel: int = 5,
         median_kernel: int = 0,
         temporal_frames: int = 2,
@@ -175,6 +189,8 @@ class MotionDetector:
             raise ValueError(f"max_fg_ratio must be within (0, 1], got {max_fg_ratio}")
         if int(burst_recover_frames) < 0:
             raise ValueError(f"burst_recover_frames must be >= 0, got {burst_recover_frames}")
+        if not 0.0 <= float(min_quality) <= 1.0:
+            raise ValueError(f"min_quality must be within [0, 1], got {min_quality}")
         for name, value in (("blur_kernel", blur_kernel), ("median_kernel", median_kernel)):
             if int(value) < 0 or (int(value) != 0 and int(value) % 2 == 0):
                 raise ValueError(f"{name} must be 0 or a positive odd number, got {value}")
@@ -215,6 +231,7 @@ class MotionDetector:
         self.max_area_ratio = float(max_area_ratio)
         self.max_fg_ratio = float(max_fg_ratio)
         self.burst_recover_frames = int(burst_recover_frames)
+        self.min_quality = float(min_quality)
         self.blur_kernel = int(blur_kernel)
         self.median_kernel = int(median_kernel)
         self.temporal_frames = int(temporal_frames)
@@ -311,14 +328,13 @@ class MotionDetector:
         matched = self._apply_persistence(candidates)
 
         detections: List[Detection] = []
-        for box, area, hits, moved, static_hits in matched:
+        for box, _area, hits, moved, static_hits, confidence in matched:
             if hits < self.min_consecutive:
                 continue
             if moved < self.min_motion_px:  # 位移不足 → 静止物体 / 抖动
                 continue
             if self.static_frames > 0 and static_hits >= self.static_frames:
                 continue  # 移动后停下：连续高 IoU，判定为静止
-            confidence = min(1.0, area / max(1.0, self.min_area_px * 4.0))
             detections.append(Detection(bbox=box, confidence=confidence, label=self.label))
         return detections
 
@@ -375,8 +391,8 @@ class MotionDetector:
 
     def _find_candidates(
         self, mask: np.ndarray, width: int, height: int
-    ) -> List[Tuple[float, float, Tuple[float, float, float, float], float]]:
-        """过滤连通域 → 碎片合并 → NMS，返回 ``(cx, cy, bbox, area)``。
+    ) -> List[Tuple[float, float, BBox, float, float]]:
+        """过滤连通域 → 碎片合并 → NMS，返回 ``(cx, cy, bbox, area, fill)``。
 
         处理顺序有意如此：先按单个连通域过滤噪点，再把属于同一物体的碎片合并成
         整体框，最后用 NMS 抑制仍残留的“整体框 + 局部框”重复。若先 NMS 再合并，
@@ -420,7 +436,7 @@ class MotionDetector:
             containment_threshold=self.nms_containment,
         )
 
-        candidates: List[Tuple[float, float, Tuple[float, float, float, float], float]] = []
+        candidates: List[Tuple[float, float, BBox, float, float]] = []
         for box in kept:
             x, y, w, h = box
             if (float(w) * float(h)) / frame_area > self.max_area_ratio:
@@ -428,27 +444,71 @@ class MotionDetector:
             if h > 0 and not self.min_aspect <= float(w) / float(h) <= self.max_aspect:
                 continue  # 两个碎片拼接后可能变成极细长条，需复查长宽比
             area = float(w) * float(h)
-            candidates.append((x + w / 2.0, y + h / 2.0, box, area))
+            fill = self._box_fill_ratio(mask, box)
+            candidates.append((x + w / 2.0, y + h / 2.0, box, area, fill))
         candidates.sort(key=lambda item: (item[1], item[0]))
         return candidates[: self._max_candidates]
 
+    @staticmethod
+    def _box_fill_ratio(mask: np.ndarray, box: BBox) -> float:
+        """框内前景像素占框面积的比例（实心目标接近 ``1.0``，空心/碎片更低）。"""
+        x, y, w, h = box
+        left = max(0, int(math.floor(x)))
+        top = max(0, int(math.floor(y)))
+        right = min(mask.shape[1], int(math.ceil(x + w)))
+        bottom = min(mask.shape[0], int(math.ceil(y + h)))
+        if right <= left or bottom <= top:
+            return 0.0
+        roi = mask[top:bottom, left:right]
+        return float(cv2.countNonZero(roi)) / float((right - left) * (bottom - top))
+
+    def _confidence(
+        self, box: BBox, fill_ratio: float, hits: int, moved: float
+    ) -> float:
+        """复合置信度：形状 × 填充率 × 持续性 × 位移，**不含面积项**。
+
+        面积不参与打分，避免“框越大分数越高”，从而让下游去重在并列时不再
+        优先保留几何错误的大框。形状项衡量长宽比偏离 1 的程度；填充项奖励实心
+        目标；持续性项奖励多帧命中；位移项区分移动（``1.0``）与静止（``0.5``）。
+        """
+        width, height = float(box[2]), float(box[3])
+        aspect = width / max(1.0, height)
+        max_aspect = max(1.000001, float(self.max_aspect))
+        aspect_score = 1.0 - min(
+            1.0, abs(math.log(max(aspect, 1e-6))) / math.log(max_aspect)
+        )
+        fill_score = min(1.0, float(fill_ratio) / max(self.min_fill_ratio, 1e-6))
+        shape_score = aspect_score * fill_score
+        persist_score = min(1.0, float(hits) / max(1, self.min_consecutive))
+        motion_score = 1.0 if moved >= self.min_motion_px else 0.5
+        score = (
+            CONFIDENCE_WEIGHT_SHAPE * shape_score
+            + CONFIDENCE_WEIGHT_FILL * fill_score
+            + CONFIDENCE_WEIGHT_PERSIST * persist_score
+            + CONFIDENCE_WEIGHT_MOTION * motion_score
+        )
+        return max(CONFIDENCE_MIN, min(CONFIDENCE_MAX, score))
+
     def _apply_persistence(
-        self, candidates: Sequence[Tuple[float, float, Any, float]]
-    ) -> List[Tuple[Any, float, int, float, int]]:
+        self, candidates: Sequence[Tuple[float, float, BBox, float, float]]
+    ) -> List[Tuple[BBox, float, int, float, int, float]]:
         """就近匹配上一帧候选，累计连续命中、位移与静止计数。
 
         ``static_hits`` 统计“相邻两次检测框 IoU ≥ ``static_iou``”的连续次数：
         目标停止移动后，背景冻结会让它一直留在前景里，仅靠 ``min_motion_px``
         （相对首次出现位置）无法识别，必须用时间连续性判定。
 
+        低质量候选（``confidence < min_quality``）不进入返回列表，但仍保留在
+        跨帧状态里，避免短暂遮挡/形状抖动导致命中计数被清零。
+
         Returns:
-            ``(box, area, hits, moved_px, static_hits)`` 列表。
+            ``(box, area, hits, moved_px, static_hits, confidence)`` 列表。
         """
         previous = self._candidates
         used = [False] * len(previous)
-        matched: List[Tuple[Any, float, int, float, int]] = []
+        matched: List[Tuple[BBox, float, int, float, int, float]] = []
         current: List[_Candidate] = []
-        for cx, cy, box, area in candidates:
+        for cx, cy, box, area, fill in candidates:
             best_index = -1
             best_distance = self._persist_radius * self._persist_radius
             for index, candidate in enumerate(previous):
@@ -472,8 +532,10 @@ class MotionDetector:
                 first_x, first_y = cx, cy
                 static_hits = 1
             moved = ((cx - first_x) ** 2 + (cy - first_y) ** 2) ** 0.5
+            confidence = self._confidence(box, fill, hits, moved)
             current.append(_Candidate(cx, cy, hits, first_x, first_y, box, static_hits))
-            matched.append((box, area, hits, moved, static_hits))
+            if confidence >= self.min_quality:
+                matched.append((box, area, hits, moved, static_hits, confidence))
         self._candidates = current[: self._max_candidates]
         return matched
 

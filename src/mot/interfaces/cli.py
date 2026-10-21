@@ -585,6 +585,7 @@ def _build_motion(config: AppConfig) -> Optional[Any]:
         max_area_ratio=config.motion.max_area_ratio,
         max_fg_ratio=config.motion.max_fg_ratio,
         burst_recover_frames=config.motion.burst_recover_frames,
+        min_quality=config.motion.min_quality,
         blur_kernel=config.motion.blur_kernel,
         median_kernel=config.motion.median_kernel,
         temporal_frames=config.motion.temporal_frames,

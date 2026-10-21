@@ -159,6 +159,33 @@ def test_small_moving_target_is_not_treated_as_burst():
     assert detector._burst_left == 0
 
 
+def test_solid_small_box_scores_higher_than_flat_wrong_box():
+    """大而扁的空心框不得比小而实的框得分高（下游去重优先保留正确框）。"""
+    mask = np.zeros((HEIGHT, WIDTH), dtype=np.uint8)
+    cv2.rectangle(mask, (10, 10), (209, 29), 255, 2)  # 200x20 空心扁框
+    cv2.rectangle(mask, (250, 150), (279, 199), 255, -1)  # 30x50 实心小框
+    detector = MotionDetector(warmup_frames=0, min_area_px=200, min_quality=0.0)
+    matched = detector._apply_persistence(detector._find_candidates(mask, WIDTH, HEIGHT))
+    assert len(matched) == 2
+    flat = max(matched, key=lambda entry: entry[0][2])
+    solid = min(matched, key=lambda entry: entry[0][2])
+    assert flat[5] < solid[5], f"flat box should score lower: {flat[5]} vs {solid[5]}"
+    assert solid[5] < 1.0  # 不再饱和
+
+    strict = MotionDetector(warmup_frames=0, min_area_px=200, min_quality=0.45)
+    kept = strict._apply_persistence(strict._find_candidates(mask, WIDTH, HEIGHT))
+    assert len(kept) == 1 and kept[0][0][2] < 100
+
+
+def test_confidence_does_not_grow_with_area():
+    """面积 800 → 8000 且形状变扁时，置信度必须下降而不是单调上升。"""
+    detector = MotionDetector(warmup_frames=0, min_quality=0.0)
+    small = detector._confidence((0.0, 0.0, 40.0, 20.0), 1.0, 3, 10.0)  # 800px²
+    large = detector._confidence((0.0, 0.0, 400.0, 20.0), 1.0, 3, 10.0)  # 8000px²
+    assert large < small
+    assert large < 1.0
+
+
 def test_multiple_moving_objects_get_separate_boxes():
     detector = MotionDetector(warmup_frames=20, min_consecutive=2)
     warm_up(detector)
@@ -416,6 +443,8 @@ def test_zero_static_frames_disables_the_check():
         {"max_fg_ratio": 0.0},
         {"max_fg_ratio": 1.1},
         {"burst_recover_frames": -1},
+        {"min_quality": -0.1},
+        {"min_quality": 1.1},
         {"blur_kernel": -1},
         {"blur_kernel": 4},
         {"median_kernel": 2},
