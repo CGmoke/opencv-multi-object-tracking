@@ -298,6 +298,42 @@ def test_vertical_strip_is_rejected_by_min_aspect():
     assert detector._find_candidates(mask, WIDTH, HEIGHT) == []
 
 
+def test_tiny_residual_contours_are_removed():
+    """掩码里成片的小碎点应全部被面积/边长过滤，只留真实目标。"""
+    mask = np.zeros((HEIGHT, WIDTH), dtype=np.uint8)
+    for x in range(0, WIDTH, 12):
+        for y in range(0, HEIGHT, 12):
+            cv2.rectangle(mask, (x, y), (x + 2, y + 2), 255, -1)  # 3x3，9px
+    cv2.rectangle(mask, (120, 80), (179, 159), 255, -1)  # 60x80 真实目标
+    detector = MotionDetector(warmup_frames=0, min_area_px=200)
+    candidates = detector._find_candidates(mask, WIDTH, HEIGHT)
+    assert len(candidates) == 1
+    box = candidates[0][2]
+    assert 118 <= box[0] <= 122 and 78 <= box[1] <= 82
+    # 紧贴目标的碎点会与目标连通，bbox 最多外扩几个像素
+    assert 58 <= box[2] <= 66 and 78 <= box[3] <= 84
+
+
+def test_merged_boxes_are_rechecked_for_aspect():
+    """两块长条各自的宽高比合格，拼接后的细长框必须再次被剔除。"""
+    mask = np.zeros((HEIGHT, WIDTH), dtype=np.uint8)
+    cv2.rectangle(mask, (20, 150), (139, 161), 255, -1)  # 120x12，aspect=10
+    cv2.rectangle(mask, (110, 150), (229, 161), 255, -1)  # 与上一块重叠 30px
+    detector = MotionDetector(warmup_frames=0, min_area_px=200, max_aspect=10.0)
+    assert detector._find_candidates(mask, WIDTH, HEIGHT) == []
+
+
+def test_tiny_residual_contours_still_allow_adjacent_objects():
+    mask = np.zeros((HEIGHT, WIDTH), dtype=np.uint8)
+    for x in range(0, WIDTH, 14):
+        cv2.rectangle(mask, (x, 10), (x + 2, 12), 255, -1)  # 顶部一排碎点
+    cv2.rectangle(mask, (60, 100), (109, 169), 255, -1)
+    cv2.rectangle(mask, (113, 100), (162, 169), 255, -1)  # 3px 间隙的相邻物体
+    detector = MotionDetector(warmup_frames=0, min_area_px=200)
+    candidates = detector._find_candidates(mask, WIDTH, HEIGHT)
+    assert len(candidates) == 2
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

@@ -361,6 +361,8 @@ class MotionDetector:
             x, y, w, h = box
             if (float(w) * float(h)) / frame_area > self.max_area_ratio:
                 continue  # 合并后仍可能是整屏突变
+            if h > 0 and not self.min_aspect <= float(w) / float(h) <= self.max_aspect:
+                continue  # 两个碎片拼接后可能变成极细长条，需复查长宽比
             area = float(w) * float(h)
             candidates.append((x + w / 2.0, y + h / 2.0, box, area))
         candidates.sort(key=lambda item: (item[1], item[0]))
