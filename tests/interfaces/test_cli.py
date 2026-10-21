@@ -312,6 +312,8 @@ class TestEndToEnd:
                 str(csv_path),
                 "--seed-box",
                 "20,40,40,40",
+                "--min-hits",
+                "1",  # 手工 seed 只提供一次检测支持；新语义下需 1 次即确认
                 "--max-frames",
                 "10",
                 "--tracker",

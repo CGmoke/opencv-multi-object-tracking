@@ -31,7 +31,8 @@ class TestSpawning:
         manager.step(None, [Detection(BOX)])
         result = manager.step(None)  # dx=0，框不动
         assert result.tracks[0].bbox == BOX
-        assert result.tracks[0].hits == 2
+        assert result.tracks[0].hits == 1  # 跟踪器自报成功不计入 hits
+        assert result.tracks[0].age == 1
 
     def test_moving_tracker_updates_bbox_and_trail(self, make_manager, tracker_pool):
         pool = tracker_pool(dx=5.0)
@@ -107,7 +108,7 @@ class TestLifecycleFiltering:
     def test_confirmed_track_keeps_its_grace_period(self, make_manager, pool):
         manager = make_manager(pool, min_hits=2, max_missing=3)
         manager.step(None, [Detection(BOX)])
-        manager.step(None)  # hits=2 → 已确认
+        manager.step(None, [Detection(BOX)])  # 第二次检测命中 → hits=2，已确认
         pool.trackers[0].alive = False
         manager.step(None)
         assert manager.get(1) is not None
@@ -117,13 +118,27 @@ class TestLifecycleFiltering:
         manager = make_manager(pool, min_hits=3)
         manager.step(None, [Detection(BOX)])
         assert manager.confirmed_tracks == ()
-        manager.step(None)
-        manager.step(None)
+        manager.step(None, [Detection(BOX)])
+        assert manager.confirmed_tracks == ()
+        manager.step(None, [Detection(BOX)])
         assert [track.track_id for track in manager.confirmed_tracks] == [1]
 
     def test_min_hits_one_confirms_immediately(self, manager):
         manager.step(None, [Detection(BOX)])
         assert [track.track_id for track in manager.confirmed_tracks] == [1]
+
+    def test_hits_count_detection_matches_only(self, make_manager, pool):
+        """跟踪器连续自报成功不增加 hits；只有检测命中才计入。"""
+        manager = make_manager(pool, min_hits=3, max_missing=50, max_coast=50)
+        manager.step(None, [Detection(BOX)])  # 第 1 次检测命中
+        for _ in range(2):
+            manager.step(None)  # 跟踪器自报 2 次（无检测）
+        assert manager.get(1).hits == 1
+        manager.step(None, [Detection(BOX)])  # 第 2 次
+        manager.step(None, [Detection(BOX)])  # 第 3 次
+        track = manager.get(1)
+        assert track.hits == 3
+        assert manager.is_confirmed(track)
 
 
 class TestBoxSmoothingWindow:
@@ -194,17 +209,49 @@ class TestLossAndExpiry:
         pool.trackers[0].alive = False
         assert manager.step(None).removed == (1,)
 
-    def test_track_recovers_when_the_tracker_returns(self, make_manager, pool):
-        manager = make_manager(pool, max_missing=5)
+    def test_track_stays_lost_when_only_the_tracker_returns(self, make_manager, pool):
+        """跟踪器复活不得把 LOST 改回 ACTIVE；只有检测匹配才能恢复。"""
+        manager = make_manager(pool, max_missing=5, max_coast=5)
         manager.step(None, [Detection(BOX)])
         pool.trackers[0].alive = False
         manager.step(None)
         pool.trackers[0].alive = True
         result = manager.step(None)
         track = manager.get(1)
-        assert track.state is TrackState.ACTIVE
+        assert track.state is TrackState.LOST
         assert track.misses == 0
         assert result.removed == ()
+        manager.step(None, [Detection(BOX)])
+        assert manager.get(1).state is TrackState.ACTIVE
+
+    def test_tracker_only_track_is_destroyed_after_max_coast(self, make_manager, pool):
+        """LOST 后跟踪器一直自报成功但无检测支持 → max_coast 到达即销毁。"""
+        manager = make_manager(pool, min_hits=1, max_missing=50, max_coast=3)
+        manager.step(None, [Detection(BOX)])  # frame 1，last_detection_frame=1
+        pool.trackers[0].alive = False
+        manager.step(None)  # frame 2：LOST，距检测 1 帧
+        pool.trackers[0].alive = True
+        assert manager.step(None).removed == ()  # frame 3：距检测 2 帧
+        result = manager.step(None)  # frame 4：距检测 3 帧 → 销毁
+        assert result.removed == (1,)
+        assert manager.get(1) is None
+
+    def test_lost_track_does_not_recover_without_detection(self, make_manager, pool):
+        """LOST 后跟踪器复活不增加 hits、不恢复 ACTIVE。"""
+        manager = make_manager(pool, min_hits=3, max_missing=20, max_coast=20)
+        for _ in range(3):
+            manager.step(None, [Detection(BOX)])
+        assert manager.get(1).hits == 3
+        pool.trackers[0].alive = False
+        manager.step(None)  # → LOST
+        pool.trackers[0].alive = True
+        manager.step(None)  # 跟踪器自报成功
+        track = manager.get(1)
+        assert track.state is TrackState.LOST
+        assert track.hits == 3
+        manager.step(None, [Detection(BOX)])
+        assert manager.get(1).state is TrackState.ACTIVE
+        assert manager.get(1).hits == 4
 
     def test_new_target_after_expiry_gets_a_new_id(self, make_manager, pool):
         manager = make_manager(pool, max_missing=0)
@@ -351,6 +398,7 @@ class TestValidation:
             {"iou_threshold": -0.1},
             {"iou_threshold": 1.1},
             {"max_missing": -1},
+            {"max_coast": -1},
             {"trail_length": 0},
             {"match_method": "nope"},
             {"box_smoothing": 0.0},

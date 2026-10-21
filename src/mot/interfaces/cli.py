@@ -647,6 +647,7 @@ def run(config: AppConfig) -> int:
             update_fn=update_tracker,
             iou_threshold=config.tracking.iou_threshold,
             max_missing=config.tracking.max_missing,
+            max_coast=config.tracking.max_coast,
             trail_length=config.tracking.trail_length,
             match_method=config.tracking.match_method,
             max_tracks=config.tracking.max_tracks,

@@ -62,6 +62,8 @@ class TrackManager:
         update_fn: 注入的跟踪器推进回调（``tracker, frame -> Optional[BBox]``）。
         iou_threshold: 检测与已有 id 关联所需的最小 IoU，也用于同帧去重。
         max_missing: 丢失目标保留 id 的帧数；``0`` 表示首次丢失即销毁。
+        max_coast: 轨迹处于 ``LOST`` 且距最后一次检测支持达到该帧数时销毁；
+            与 ``max_missing`` 同时生效，取二者更严者。默认 ``8``。
         trail_length: 每个目标保留的轨迹点上限。
         match_method: ``"greedy"``（默认）或 ``"hungarian"``。
         id_allocator: 可选共享分配器；id 单调递增。
@@ -83,6 +85,7 @@ class TrackManager:
         update_fn: TrackerUpdateFn,
         iou_threshold: float = 0.3,
         max_missing: int = 15,
+        max_coast: int = 8,
         trail_length: int = 120,
         match_method: str = "greedy",
         id_allocator: Optional[IdAllocator] = None,
@@ -113,12 +116,19 @@ class TrackManager:
                 field="smooth_window",
                 value=smooth_window,
             )
+        if int(max_coast) < 0:
+            raise ValidationError(
+                f"max_coast must be >= 0, got {max_coast}",
+                field="max_coast",
+                value=max_coast,
+            )
 
         self._tracker_factory = tracker_factory
         self._init_fn = init_fn
         self._update_fn = update_fn
         self.iou_threshold = validate_iou_threshold(iou_threshold)
         self.max_missing = validate_max_missing(max_missing)
+        self.max_coast = int(max_coast)
         self.trail_length = validate_trail_length(trail_length)
         self.match_method = match_method
         self.max_tracks = validate_max_tracks(max_tracks)
@@ -184,8 +194,8 @@ class TrackManager:
         spawn_failures = 0
 
         pairs: List[Tuple[int, int]] = []
-        updated_ids: set = set()
-        # 1. 推进已有跟踪器。
+        # 1. 推进已有跟踪器。跟踪器自报成功只刷新几何，不计命中、不改状态：
+        #    ``hits`` 只表示“被检测支持的命中次数”。
         for track_id in list(self._tracks):
             track = self._tracks[track_id]
             track.age += 1
@@ -194,7 +204,6 @@ class TrackManager:
                 box = self._clip_to_frame(box, frame)
             if box is not None:
                 self._accept_box(track, box, frame_index)
-                updated_ids.add(track_id)
             else:
                 track.misses += 1
                 track.state = TrackState.LOST
@@ -220,11 +229,12 @@ class TrackManager:
                 if not self._refresh(track, detection, frame):
                     continue
                 track.state = TrackState.ACTIVE
-                # 跟踪器本帧已计过一次成功更新；检测只在该目标被“救回”时补一次 hit。
-                if track.track_id not in updated_ids:
-                    track.hits += 1
+                # 检测匹配是唯一的命中来源：同帧即使跟踪器也自报成功，
+                # 也只记一次（且不计跟踪器的“成功”）。
+                track.hits += 1
                 track.misses = 0
                 track.last_seen_frame = frame_index
+                track.last_detection_frame = frame_index
             for det_idx in unmatched_detections:
                 detection = detections[det_idx]
                 track = self._spawn(detection, frame, frame_index)
@@ -232,6 +242,18 @@ class TrackManager:
                     spawn_failures += 1  # _spawn 已更新总数
                 else:
                     created.append(track.track_id)
+
+        # 3. 滑行上限：LOST 且距最后一次检测支持达到 ``max_coast`` 的轨迹销毁。
+        #    与 max_missing 并行生效，谁先触发谁负责回收。
+        for track_id in list(self._tracks):
+            track = self._tracks[track_id]
+            if track.state is not TrackState.LOST:
+                continue
+            if frame_index - track.last_detection_frame < self.max_coast:
+                continue
+            del self._tracks[track_id]
+            self.total_removed += 1
+            removed.append(track_id)
 
         return StepResult(
             tracks=self.tracks,
@@ -260,6 +282,7 @@ class TrackManager:
             track.misses = 0
             track.state = TrackState.ACTIVE
             track.last_seen_frame = self.frame_index
+            track.last_detection_frame = self.frame_index
             return track
         return self._spawn(detection, frame, self.frame_index)
 
@@ -309,10 +332,13 @@ class TrackManager:
         return clip_bbox(box, width, height)
 
     def _accept_box(self, track: TrackedObject, box: BBox, frame_index: int) -> None:
+        """用跟踪器框刷新几何与轨迹。
+
+        跟踪器自报成功**不是**检测支持：这里不计 ``hits``，也不把 ``LOST``
+        改回 ``ACTIVE``；状态只能由检测匹配恢复。
+        """
         box = self._smooth_box(track, box)
         track.bbox = box
-        track.state = TrackState.ACTIVE
-        track.hits += 1
         track.misses = 0
         track.last_seen_frame = frame_index
         track.push_trail(bbox_center(box), self.trail_length)
@@ -400,6 +426,7 @@ class TrackManager:
             hits=1,
             created_frame=frame_index,
             last_seen_frame=frame_index,
+            last_detection_frame=frame_index,
             box_history=deque(maxlen=self.smooth_window if self.smooth_window > 1 else 0),
         )
         if self.smooth_window > 1:

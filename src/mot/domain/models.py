@@ -197,6 +197,8 @@ class TrackedObject:
     age: int = 0
     created_frame: int = 0
     last_seen_frame: int = 0
+    #: 最近一次被检测（而非跟踪器自报）支持的帧号；``max_coast`` 以此为基准。
+    last_detection_frame: int = 0
     trail: Deque[Point] = field(default_factory=deque)
     #: 最近的原始包围盒（滑动平均平滑用；由 ``TrackManager`` 维护）。
     box_history: Deque[BBox] = field(default_factory=deque)

@@ -274,8 +274,8 @@ class TestLifecycleFiltering:
         first = pipeline.step(None, extra_detections=[Detection(BOX)])
         assert first.created == (1,)
         assert first.tracks == ()  # 未确认 → 不输出
-        pipeline.step(None)
-        assert pipeline.step(None).tracks  # hits=3 → 确认并输出
+        pipeline.step(None, extra_detections=[Detection(BOX)])
+        assert pipeline.step(None, extra_detections=[Detection(BOX)]).tracks
 
     def test_tentative_track_disappears_after_a_miss(self, make_manager, pool):
         manager = make_manager(pool, min_hits=3)
