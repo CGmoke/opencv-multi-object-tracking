@@ -163,6 +163,14 @@ class TestBuildConfig:
         assert config.motion.method == "knn"
         assert config.motion.dist2_threshold == 625
 
+    def test_motion_static_flags(self):
+        args = build_parser().parse_args(
+            ["--motion", "--motion-static-iou", "0.9", "--motion-static-frames", "5"]
+        )
+        config = build_config(args)
+        assert config.motion.static_iou == 0.9
+        assert config.motion.static_frames == 5
+
     def test_motion_mask_flags(self):
         args = build_parser().parse_args(
             ["--motion", "--motion-temporal", "3", "--motion-aspect", "0.2,8"]

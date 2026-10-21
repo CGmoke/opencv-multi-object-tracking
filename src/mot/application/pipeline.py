@@ -75,6 +75,9 @@ class MOTPipeline:
         max_box_change: 轨迹二次校验的尺寸突变上限（默认 ``1.6``）。与活跃目标 IoU
             达到 ``manager.iou_threshold`` 的检测，若宽或高的相对变化超过该倍率，则
             视为同一目标的局部框/碎片被丢弃；``1.0`` 关闭该校验。
+        static_iou: 静止判定的 IoU 阈值（默认 ``0.95``）。活跃目标在当前框与判定
+            锚框的 IoU 连续 ``static_frames`` 帧不低于该值时，判定为“已静止”并销毁该 id。
+        static_frames: 静止判定所需的连续帧数（默认 ``0`` 关闭；运动检测模式由配置开启）。
     """
 
     def __init__(
@@ -83,6 +86,8 @@ class MOTPipeline:
         detector: Optional[DetectorFn] = None,
         detection_interval: int = 1,
         max_box_change: float = 1.6,
+        static_iou: float = 0.95,
+        static_frames: int = 0,
     ) -> None:
         if detector is not None and not callable(detector):
             raise TypeError("detector must be callable: (frame, timestamp) -> Sequence[Detection]")
@@ -98,11 +103,28 @@ class MOTPipeline:
                 field="max_box_change",
                 value=max_box_change,
             )
+        if not 0.0 < float(static_iou) <= 1.0:
+            raise ValidationError(
+                f"static_iou must be within (0, 1], got {static_iou}",
+                field="static_iou",
+                value=static_iou,
+            )
+        if int(static_frames) < 0:
+            raise ValidationError(
+                f"static_frames must be >= 0, got {static_frames}",
+                field="static_frames",
+                value=static_frames,
+            )
         self._manager = manager
         self._detector = detector
         self._detection_interval = int(detection_interval)
         self.max_box_change = float(max_box_change)
+        self.static_iou = float(static_iou)
+        self.static_frames = int(static_frames)
         self.size_rejects = 0
+        self.static_removed = 0
+        self._static_anchor: Dict[int, Tuple[float, float, float, float]] = {}
+        self._static_hits: Dict[int, int] = {}
         self._warned_size_jump = False
         self._since_detection = 0
         self.frame_count = 0
@@ -131,6 +153,7 @@ class MOTPipeline:
             "spawn_failures": self._manager.spawn_failures,
             "trail_points": sum(len(track.trail) for track in self._manager.tracks),
             "size_rejects": self.size_rejects,
+            "static_removed": self.static_removed,
         }
 
     # -- 单帧 ------------------------------------------------------------
@@ -160,12 +183,20 @@ class MOTPipeline:
         detections = self._reject_size_outliers(detections)
         detections = self._dedupe(detections)
         result = self._manager.step(frame, detections)
+        removed_static = self._drop_static_tracks()
+        if removed_static:
+            dropped = set(removed_static)
+            tracks = tuple(track for track in result.tracks if track.track_id not in dropped)
+            removed = result.removed + removed_static
+        else:
+            tracks = result.tracks
+            removed = result.removed
         return FrameResult(
             frame_index=self._manager.frame_index,
             timestamp=float(timestamp),
-            tracks=result.tracks,
+            tracks=tracks,
             created=result.created,
-            removed=result.removed,
+            removed=removed,
             matched=result.matched,
             matched_ids=result.matched_ids,
             detections=tuple(detections),
@@ -198,6 +229,10 @@ class MOTPipeline:
         self._manager.reset()
         self.frame_count = 0
         self._since_detection = 0
+        self._static_anchor.clear()
+        self._static_hits.clear()
+        self.size_rejects = 0
+        self.static_removed = 0
 
     def clear_trails(self) -> None:
         self._manager.clear_trails()
@@ -228,6 +263,46 @@ class MOTPipeline:
                     f"got {type(item).__name__}"
                 )
         return out
+
+    def _drop_static_tracks(self) -> Tuple[int, ...]:
+        """IoU 时间连续性判定：销毁长时间几乎不动的目标。
+
+        以“判定锚框”为基准（而不是上一帧）：目标每帧的微小抖动不会重置计数，
+        只有相对锚框累计位移足够大（IoU 掉到 ``static_iou`` 以下）才重新计时。
+        ``LOST`` 目标不参与（遮挡期间没有可靠框）；重新激活后从头计时。
+        """
+        limit = self.static_frames
+        if limit <= 0:
+            return ()
+        live = {track.track_id for track in self._manager.tracks}
+        for track_id in list(self._static_anchor):
+            if track_id not in live:
+                self._static_anchor.pop(track_id, None)
+                self._static_hits.pop(track_id, None)
+
+        removed: List[int] = []
+        for track in self._manager.tracks:
+            if not track.is_active:
+                self._static_anchor.pop(track.track_id, None)
+                self._static_hits.pop(track.track_id, None)
+                continue
+            anchor = self._static_anchor.get(track.track_id)
+            if anchor is None:
+                self._static_anchor[track.track_id] = track.bbox
+                self._static_hits[track.track_id] = 1
+                continue
+            if box_iou(track.bbox, anchor) >= self.static_iou:
+                hits = self._static_hits.get(track.track_id, 1) + 1
+            else:
+                self._static_anchor[track.track_id] = track.bbox
+                hits = 1
+            self._static_hits[track.track_id] = hits
+            if hits >= limit and self._manager.remove(track.track_id):
+                removed.append(track.track_id)
+                self._static_anchor.pop(track.track_id, None)
+                self._static_hits.pop(track.track_id, None)
+        self.static_removed += len(removed)
+        return tuple(removed)
 
     def _reject_size_outliers(self, detections: Sequence[Detection]) -> List[Detection]:
         """轨迹二次校验：丢弃与活跃目标重叠但尺寸突变的检测。

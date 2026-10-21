@@ -156,6 +156,8 @@ mot-track --dump-config --iou-threshold 0.4 --tracker kcf
 | `--motion-min-area` | `200` | 最小前景面积（像素，噪点过滤） |
 | `--motion-min-size` | `8` | 最小目标边长（像素，尺寸阈值） |
 | `--motion-min-motion` | `6` | 最小位移（像素，排除静止物体） |
+| `--motion-static-iou` | `0.95` | 相邻检测框 IoU 达到该值即视为“未移动” |
+| `--motion-static-frames` | `30` | 连续静止多少次后剔除该目标（`0` 关闭） |
 | `--motion-min-consecutive` | `2` | 连续命中帧数（抑制单帧噪点） |
 | `--motion-blur` | `5` | 灰度图高斯模糊核（奇数，`0` 关闭；压制传感器颗粒） |
 | `--motion-median` | `0` | 中值滤波核（奇数，`0` 关闭；椒盐噪声明显时设 `3`） |
@@ -261,6 +263,7 @@ python3 -m mot --source 0 --motion --motion-sensitivity 10 --motion-min-area 400
 | NMS | `nms_iou` / `nms_containment` | 抑制重叠框与被整体框包含的局部框 |
 | 连续命中 | `min_consecutive` | 单帧闪烁不入管道 |
 | 位移门限 | `min_motion_px` | 中心位移不足视为静止，不输出 |
+| 静止剔除 | `static_iou` / `static_frames` | IoU 时间连续性：移动后停下的目标连续 `static_frames` 次不移动后剔除 |
 
 **颗粒度与稳定性**：默认只合并 IoU ≥ 0.15 的重叠碎片（`merge_gap_px=0` 关闭间隙合并），
 因此一个物体只会得到**一个完整框**；有间隙的相邻物体保持各自独立的框与 ID。若目标被
@@ -270,6 +273,11 @@ python3 -m mot --source 0 --motion --motion-sensitivity 10 --motion-min-area 400
 **轨迹二次校验**：已建立 ID 的目标若收到与自身框高度重叠、但宽或高突变超过
 `--max-box-change`（默认 `1.6` 倍）的检测，该检测会被丢弃，目标继续由自身跟踪器推进，
 避免局部框/碎片框顶替整体框（`1` 关闭校验）。
+
+**静止剔除**：目标移动后停下时，背景冻结会让它一直留在前景里，`min_motion_px` 无法
+识别。此时用 IoU 时间连续性判定——相邻检测框 IoU ≥ `static_iou`（默认 `0.95`）连续
+`static_frames`（默认 `30`）次即判定静止：检测端停止输出该候选，跟踪端同时销毁该 ID；
+目标再次移动后重新获得新 ID。`--motion-static-frames 0` 可关闭。
 
 **实际尺寸**：给出标定 `pixels_per_meter`（现场用已知尺寸参考物换算）后，每个框的标签
 会显示如 `0.42x0.55m medium`（`small` ≤ 0.5 m，`large` ≥ 2.0 m，阈值可配）；未标定时

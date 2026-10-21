@@ -196,6 +196,8 @@ class TestMotionSection:
         assert motion.dist2_threshold == 400.0
         assert motion.temporal_frames == 2
         assert (motion.min_aspect, motion.max_aspect) == (0.1, 10.0)
+        assert motion.static_iou == 0.95
+        assert motion.static_frames == 30
         assert motion.min_area_px == 200.0
         assert motion.pixels_per_meter is None
 
@@ -206,6 +208,9 @@ class TestMotionSection:
             "  method: yolo\n",
             "  dist2_threshold: 0\n",
             "  temporal_frames: 0\n",
+            "  static_iou: 0\n",
+            "  static_iou: 1.5\n",
+            "  static_frames: -1\n",
             "  min_aspect: 0\n",
             "  min_aspect: 5\n  max_aspect: 2\n",
             "  min_area_px: -1\n",

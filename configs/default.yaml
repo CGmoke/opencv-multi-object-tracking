@@ -99,6 +99,11 @@ motion:
   # A candidate must persist this many frames AND move at least min_motion_px.
   min_consecutive: 2
   min_motion_px: 6.0
+  # Static-target removal by IoU temporal continuity: consecutive detections whose
+  # boxes overlap this much count as "not moving"; after static_frames in a row the
+  # target is dropped (catches objects that moved and then stopped).
+  static_iou: 0.95
+  static_frames: 30
   morph_kernel: 3
   # Run motion detection every N frames; the first frame always runs it.
   interval: 2

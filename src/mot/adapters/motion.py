@@ -29,16 +29,31 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
 from typing import Any, Deque, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 
-from mot.domain.models import Detection, clip_bbox
+from mot.domain.geometry import box_iou
+from mot.domain.models import BBox, Detection, clip_bbox
 from mot.domain.postprocess import merge_fragments, nms
 
 #: 支持的背景建模后端。
 BACKGROUND_METHODS: Tuple[str, ...] = ("mog2", "knn")
+
+
+@dataclass
+class _Candidate:
+    """跨检测帧的候选状态（用于连续命中、位移与静止判定）。"""
+
+    cx: float
+    cy: float
+    hits: int
+    first_x: float
+    first_y: float
+    box: BBox
+    static_hits: int
 
 
 class MotionDetector:
@@ -78,6 +93,11 @@ class MotionDetector:
         min_consecutive: 需要连续命中的帧数（``1`` 表示不要求持续性）。
         min_motion_px: **位移门限**：候选中心相对首次出现位置的位移小于该值（像素）时
             不输出，用于排除静止物体与轻微抖动；``0`` 表示关闭该过滤。
+        static_iou: **静止判定**的 IoU 阈值（默认 ``0.95``）：相邻两次检测的框 IoU
+            达到该值即视为“没有移动”，连续 ``static_frames`` 次后停止输出该候选。
+            与 ``min_motion_px`` 互补——后者只看“从没动过”，前者能识别**移动后停下**
+            的目标（背景冻结时它仍留在前景里）。
+        static_frames: 判定为静止所需的连续高 IoU 次数（默认 ``30``；``0`` 关闭）。
         morph_kernel: 形态学核边长（``<=1`` 表示跳过形态学）。
         persist_radius_px: 连续命中的中心点匹配半径。
         max_candidates: 保留的候选上限（防止异常帧爆量）。
@@ -115,6 +135,8 @@ class MotionDetector:
         nms_containment: float = 0.8,
         min_consecutive: int = 2,
         min_motion_px: float = 6.0,
+        static_iou: float = 0.95,
+        static_frames: int = 30,
         morph_kernel: int = 3,
         persist_radius_px: float = 40.0,
         max_candidates: int = 200,
@@ -161,6 +183,10 @@ class MotionDetector:
             raise ValueError(f"min_consecutive must be >= 1, got {min_consecutive}")
         if float(min_motion_px) < 0:
             raise ValueError(f"min_motion_px must be >= 0, got {min_motion_px}")
+        if not 0.0 < float(static_iou) <= 1.0:
+            raise ValueError(f"static_iou must be within (0, 1], got {static_iou}")
+        if int(static_frames) < 0:
+            raise ValueError(f"static_frames must be >= 0, got {static_frames}")
         if int(warmup_frames) < 0:
             raise ValueError(f"warmup_frames must be >= 0, got {warmup_frames}")
         if not 0.0 < float(warmup_rate) <= 1.0:
@@ -182,6 +208,8 @@ class MotionDetector:
         self.nms_containment = float(nms_containment)
         self.min_consecutive = int(min_consecutive)
         self.min_motion_px = float(min_motion_px)
+        self.static_iou = float(static_iou)
+        self.static_frames = int(static_frames)
         self.label = str(label)
         self.method = backend
         self.var_threshold = float(var_threshold)
@@ -195,7 +223,7 @@ class MotionDetector:
         self._warmup_rate = float(warmup_rate)
         self._frame_count = 0
         self._size: Optional[Tuple[int, int]] = None  # (width, height)
-        self._candidates: List[Tuple[float, float, int, float, float]] = []
+        self._candidates: List[_Candidate] = []
         self._masks: Deque[np.ndarray] = deque(maxlen=self.temporal_frames)
         self._background = self._make_background()
         self._learning_rate = float(learning_rate)
@@ -251,11 +279,13 @@ class MotionDetector:
         matched = self._apply_persistence(candidates)
 
         detections: List[Detection] = []
-        for box, area, hits, moved in matched:
+        for box, area, hits, moved, static_hits in matched:
             if hits < self.min_consecutive:
                 continue
             if moved < self.min_motion_px:  # 位移不足 → 静止物体 / 抖动
                 continue
+            if self.static_frames > 0 and static_hits >= self.static_frames:
+                continue  # 移动后停下：连续高 IoU，判定为静止
             confidence = min(1.0, area / max(1.0, self.min_area_px * 4.0))
             detections.append(Detection(bbox=box, confidence=confidence, label=self.label))
         return detections
@@ -370,36 +400,46 @@ class MotionDetector:
 
     def _apply_persistence(
         self, candidates: Sequence[Tuple[float, float, Any, float]]
-    ) -> List[Tuple[Any, float, int, float]]:
-        """就近匹配上一帧候选，累计连续命中次数并计算相对首次出现位置的位移。
+    ) -> List[Tuple[Any, float, int, float, int]]:
+        """就近匹配上一帧候选，累计连续命中、位移与静止计数。
+
+        ``static_hits`` 统计“相邻两次检测框 IoU ≥ ``static_iou``”的连续次数：
+        目标停止移动后，背景冻结会让它一直留在前景里，仅靠 ``min_motion_px``
+        （相对首次出现位置）无法识别，必须用时间连续性判定。
 
         Returns:
-            ``(box, area, hits, moved_px)`` 列表；``moved_px`` 用于排除静止物体。
+            ``(box, area, hits, moved_px, static_hits)`` 列表。
         """
         previous = self._candidates
         used = [False] * len(previous)
-        matched: List[Tuple[Any, float, int, float]] = []
-        current: List[Tuple[float, float, int, float, float]] = []
+        matched: List[Tuple[Any, float, int, float, int]] = []
+        current: List[_Candidate] = []
         for cx, cy, box, area in candidates:
             best_index = -1
             best_distance = self._persist_radius * self._persist_radius
-            for index, (px, py, _hits, _fx, _fy) in enumerate(previous):
+            for index, candidate in enumerate(previous):
                 if used[index]:
                     continue
-                distance = (cx - px) ** 2 + (cy - py) ** 2
+                distance = (cx - candidate.cx) ** 2 + (cy - candidate.cy) ** 2
                 if distance <= best_distance:
                     best_distance = distance
                     best_index = index
             if best_index >= 0:
                 used[best_index] = True
-                hits = previous[best_index][2] + 1
-                first_x, first_y = previous[best_index][3], previous[best_index][4]
+                prev = previous[best_index]
+                hits = prev.hits + 1
+                first_x, first_y = prev.first_x, prev.first_y
+                if box_iou(prev.box, box) >= self.static_iou:
+                    static_hits = prev.static_hits + 1
+                else:
+                    static_hits = 1
             else:
                 hits = 1
                 first_x, first_y = cx, cy
+                static_hits = 1
             moved = ((cx - first_x) ** 2 + (cy - first_y) ** 2) ** 0.5
-            current.append((cx, cy, hits, first_x, first_y))
-            matched.append((box, area, hits, moved))
+            current.append(_Candidate(cx, cy, hits, first_x, first_y, box, static_hits))
+            matched.append((box, area, hits, moved, static_hits))
         self._candidates = current[: self._max_candidates]
         return matched
 

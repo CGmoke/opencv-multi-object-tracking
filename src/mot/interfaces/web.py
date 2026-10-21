@@ -397,11 +397,14 @@ class SessionRegistry:
             box_smoothing=config.tracking.box_smoothing,
         )
         detector = _build_detector(config)
+        motion_mode = config.detector.backend == "none" and config.motion.enabled
         pipeline = MOTPipeline(
             manager,
             detector=detector,
             detection_interval=_detection_interval(config),
             max_box_change=config.tracking.max_box_change,
+            static_iou=config.motion.static_iou,
+            static_frames=config.motion.static_frames if motion_mode else 0,
         )
 
         out_dir = _output_dir(config)

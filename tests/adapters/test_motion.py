@@ -334,6 +334,47 @@ def test_tiny_residual_contours_still_allow_adjacent_objects():
     assert len(candidates) == 2
 
 
+def test_object_stopping_after_motion_is_dropped():
+    """移动后停下：IoU 连续达到阈值时不再输出（min_motion_px 对此无效）。"""
+    detector = MotionDetector(
+        warmup_frames=20,
+        min_consecutive=1,
+        static_iou=0.95,
+        static_frames=3,
+        temporal_frames=1,  # 隔离时序掩码的启动延迟
+    )
+    warm_up(detector)
+    moving = [detector(with_box(x, 90), 0.0) for x in (60, 75, 90, 105)]
+    assert all(moving[1:]), "moving object should be detected"  # 首帧位移不足
+    stopped = [len(detector(with_box(105, 90), 0.0)) for _ in range(6)]
+    assert stopped[0] == 1  # 刚停下的第一帧仍输出
+    assert stopped[-1] == 0  # 连续静止达到窗口后被剔除
+    assert stopped.index(0) <= 2
+
+
+def test_continuously_moving_object_is_never_dropped():
+    detector = MotionDetector(
+        warmup_frames=20,
+        min_consecutive=1,
+        static_iou=0.95,
+        static_frames=3,
+        temporal_frames=1,
+    )
+    warm_up(detector)
+    detections = [detector(with_box(40 + 12 * step, 90), 0.0) for step in range(12)]
+    assert all(detections[1:]), "IoU 未达到阈值时静止计数应重置"  # 首帧位移不足
+
+
+def test_zero_static_frames_disables_the_check():
+    detector = MotionDetector(
+        warmup_frames=20, min_consecutive=1, static_iou=0.95, static_frames=0
+    )
+    warm_up(detector)
+    for x in (60, 75, 90):
+        detector(with_box(x, 90), 0.0)
+    assert all(detector(with_box(90, 90), 0.0) for _ in range(6))
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -359,6 +400,9 @@ def test_tiny_residual_contours_still_allow_adjacent_objects():
         {"nms_containment": 0.0},
         {"min_consecutive": 0},
         {"min_motion_px": -1},
+        {"static_iou": 0.0},
+        {"static_iou": 1.1},
+        {"static_frames": -1},
         {"warmup_frames": -1},
         {"warmup_rate": 0.0},
     ],

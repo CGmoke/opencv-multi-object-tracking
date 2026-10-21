@@ -219,6 +219,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="frames a candidate must persist before it is accepted",
     )
     parser.add_argument(
+        "--motion-static-iou",
+        dest="motion_static_iou",
+        type=float,
+        default=None,
+        help="IoU above which two consecutive detections count as 'not moving' (default 0.95)",
+    )
+    parser.add_argument(
+        "--motion-static-frames",
+        dest="motion_static_frames",
+        type=int,
+        default=None,
+        help="consecutive static detections before the target is dropped (0 = off, default 30)",
+    )
+    parser.add_argument(
         "--motion-min-fill",
         dest="motion_min_fill",
         type=float,
@@ -399,6 +413,10 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.motion.min_motion_px = args.motion_min_motion
     if getattr(args, "motion_min_consecutive", None) is not None:
         config.motion.min_consecutive = args.motion_min_consecutive
+    if getattr(args, "motion_static_iou", None) is not None:
+        config.motion.static_iou = args.motion_static_iou
+    if getattr(args, "motion_static_frames", None) is not None:
+        config.motion.static_frames = args.motion_static_frames
     if getattr(args, "motion_min_fill", None) is not None:
         config.motion.min_fill_ratio = args.motion_min_fill
     if getattr(args, "motion_blur", None) is not None:
@@ -507,6 +525,8 @@ def _build_motion(config: AppConfig) -> Optional[Any]:
         nms_containment=config.motion.nms_containment,
         min_consecutive=config.motion.min_consecutive,
         min_motion_px=config.motion.min_motion_px,
+        static_iou=config.motion.static_iou,
+        static_frames=config.motion.static_frames,
         morph_kernel=config.motion.morph_kernel,
         warmup_frames=config.motion.warmup_frames,
         warmup_rate=config.motion.warmup_rate,
@@ -559,7 +579,8 @@ def run(config: AppConfig) -> int:
             box_smoothing=config.tracking.box_smoothing,
         )
         detector = build_detector(config)
-        if detector is None and config.motion.enabled:
+        motion_mode = detector is None and config.motion.enabled
+        if motion_mode:
             detector = _build_motion(config)
     except (TrackerSetupError, ConfigError, ImportError) as exc:
         LOGGER.error("%s", exc)
@@ -570,6 +591,9 @@ def run(config: AppConfig) -> int:
         detector=detector,
         detection_interval=_detection_interval(config),
         max_box_change=config.tracking.max_box_change,
+        static_iou=config.motion.static_iou,
+        # 静止剔除只用于运动检测模式；手工/外部检测器模式默认不动目标的 ID。
+        static_frames=config.motion.static_frames if motion_mode else 0,
     )
 
     try:

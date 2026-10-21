@@ -260,6 +260,7 @@ class MotionConfig:
         * ``dist2_threshold``：KNN 的平方距离阈值（仅 ``method="knn"`` 生效）；
         * ``min_area_px`` / ``min_width_px`` / ``min_height_px``：最小目标尺寸阈值；
         * ``min_motion_px``：位移门限，用于排除静止物体；
+        * ``static_iou`` / ``static_frames``：IoU 时间连续性判定，识别“移动后停下”的目标；
         * ``min_consecutive``：连续命中帧数，用于抑制噪点；
         * ``blur_kernel`` / ``median_kernel``：输入灰度图的高斯 / 中值滤波核（压噪）；
         * ``temporal_frames``：最近 N 帧掩码按位与，压掉单帧闪烁；
@@ -295,6 +296,8 @@ class MotionConfig:
     nms_containment: float = 0.8
     min_consecutive: int = 2
     min_motion_px: float = 6.0
+    static_iou: float = 0.95
+    static_frames: int = 30
     morph_kernel: int = 3
     interval: int = 2
     pixels_per_meter: Optional[float] = None
@@ -340,6 +343,8 @@ class MotionConfig:
         )
         self.min_consecutive = _as_int(self.min_consecutive, "motion.min_consecutive", 1, 1000)
         self.min_motion_px = _as_float(self.min_motion_px, "motion.min_motion_px", 0.0, 100_000.0)
+        self.static_iou = _as_float(self.static_iou, "motion.static_iou", 1e-6, 1.0)
+        self.static_frames = _as_int(self.static_frames, "motion.static_frames", 0, 100_000)
         self.morph_kernel = _as_int(self.morph_kernel, "motion.morph_kernel", 1, 99)
         self.interval = _as_int(self.interval, "motion.interval", 1, 1000)
         if self.pixels_per_meter is not None:

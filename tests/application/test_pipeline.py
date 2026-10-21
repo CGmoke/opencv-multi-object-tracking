@@ -208,6 +208,65 @@ class TestTrackSanityCheck:
             MOTPipeline(make_manager(pool), max_box_change=0.5)
 
 
+class TestStaticTrackRemoval:
+    """IoU 时间连续性：长时间不动的目标会被销毁。"""
+
+    def test_static_track_is_removed_after_the_window(self, make_manager, pool):
+        manager = make_manager(pool)
+        pipeline = MOTPipeline(manager, static_frames=3)
+        pipeline.step(None, extra_detections=[Detection(BOX)])
+        results = [pipeline.step(None, extra_detections=[Detection(BOX)]) for _ in range(4)]
+        removed_ids = [track_id for result in results for track_id in result.removed]
+        assert 1 in removed_ids
+        assert pipeline.static_removed >= 1
+        removal = next(result for result in results if 1 in result.removed)
+        assert all(track.track_id != 1 for track in removal.tracks)
+
+    def test_moving_track_is_kept(self, make_manager, tracker_pool):
+        pool = tracker_pool(dx=8.0)
+        manager = make_manager(pool)
+        pipeline = MOTPipeline(manager, static_frames=3)
+        pipeline.step(None, extra_detections=[Detection(BOX)])
+        for _ in range(6):
+            pipeline.step(None)
+        assert manager.get(1) is not None
+        assert pipeline.static_removed == 0
+
+    def test_zero_disables_removal(self, make_manager, pool):
+        manager = make_manager(pool)
+        pipeline = MOTPipeline(manager, static_frames=0)
+        pipeline.step(None, extra_detections=[Detection(BOX)])
+        for _ in range(6):
+            pipeline.step(None, extra_detections=[Detection(BOX)])
+        assert manager.get(1) is not None
+        assert pipeline.static_removed == 0
+
+    def test_lost_tracks_do_not_accumulate(self, make_manager, pool):
+        manager = make_manager(pool, max_missing=10)
+        pipeline = MOTPipeline(manager, static_frames=3)
+        pipeline.step(None, extra_detections=[Detection(BOX)])
+        pool.trackers[0].alive = False
+        for _ in range(5):
+            pipeline.step(None)  # LOST：不参与静止计数
+        assert manager.get(1) is not None
+        assert pipeline.static_removed == 0
+
+    def test_reset_clears_static_state(self, make_manager, pool):
+        pipeline = MOTPipeline(make_manager(pool), static_frames=5)
+        pipeline.step(None, extra_detections=[Detection(BOX)])
+        pipeline.step(None, extra_detections=[Detection(BOX)])
+        assert pipeline._static_hits
+        pipeline.reset()
+        assert pipeline._static_hits == {}
+        assert pipeline.static_removed == 0
+
+    def test_invalid_parameters_are_rejected(self, make_manager, pool):
+        with pytest.raises(ValidationError):
+            MOTPipeline(make_manager(pool), static_frames=-1)
+        with pytest.raises(ValidationError):
+            MOTPipeline(make_manager(pool), static_iou=0.0)
+
+
 class TestDetectionNormalisation:
     def test_tuples_are_accepted(self, make_manager, pool):
         pipeline = make_pipeline(make_manager, pool)
