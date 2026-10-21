@@ -1,0 +1,121 @@
+# ---------------------------------------------------------------------------
+# 浏览器上传视频调优配置（≈720x1280 竖屏 / 手持拍摄）
+#
+# 针对 outputs/web_s4.jsonl 实测诊断的定向调参（源视频 fc4500506527e48886b2613e31e9a11b.mp4）：
+#   ids active 77 / created 138（frame 140），CAP/PROC/STR 全 0.6 FPS
+#   ID 膨胀比 1.89x / 离谱几何 53.7%（按 720x1280 口径）/ 同帧重复对 0
+#
+# 与 configs/indoor-640.yaml（640x480 固定机位）的关键差异：
+#   1. 面积/尺寸/位移阈值按 3 倍像素量缩放（720x1280 = 3.0x 640x480 的像素数）；
+#   2. learning_rate 0.0 -> 0.01：手持抖动 + 冻结背景 = ghost 永久残留，
+#      小正学习率让背景模型缓慢吸收「移动过的静态区域」；
+#   3. max_area_ratio 0.25 -> 0.3：竖屏近景人脸/人物常占 25%~30% 画面，
+#      收得太紧会把真实近景目标拒掉（离谱几何交给 min_aspect/fill 与轨迹去重）。
+#
+# 用法：
+#   mot-web --config configs/upload-720.yaml            # Web 上传视频场景
+#   mot-track --config configs/upload-720.yaml --dump-config   # 先校验加载
+# ---------------------------------------------------------------------------
+source:
+  source: "0"
+  max_frames: null
+  loop: false
+  seed_boxes: []
+
+tracking:
+  # 手持视频噪点预算不可控，kcf 单轨迹成本约为 csrt 的 1/4~1/10，
+  # 这是把 PROC 从 0.6 FPS 拉回两位数的第一杠杆。
+  backend: kcf
+  iou_threshold: 0.35
+  max_missing: 8
+  # FPS 地板：24 个 kcf 在 720x1280 下仍能维持 ~15 FPS；
+  # 超出容量的候选直接 spawn 失败，切断「噪点越多->FPS 越低->采样越稀->噪点越多」正反馈。
+  max_tracks: 24
+  box_smoothing: 1.0
+  min_hits: 3
+  smooth_window: 3
+  max_box_change: 1.5
+  # 无检测支持滑行上限 + 轨迹端去重（P1 补丁键，显式写出便于现场调）。
+  max_coast: 8
+  dedupe_tracks: true
+  merge_track_iou: 0.5
+  merge_track_frames: 5
+  max_parallel: 0
+
+detector:
+  # 运动检测无法区分「海报/展品/人」，这是 web_s4 噪点的范式级根因。
+  # ultralytics 装好后改为：
+  #   backend: yolo
+  #   model: yolo11n.pt          # 权重不随仓库分发，首次运行自动下载
+  #   confidence: 0.35
+  #   classes: [0]               # 只要人；空列表 = 全部类别
+  #   interval: 3                # 每 3 帧检测一次，间隙由跟踪器推进
+  backend: none
+  model: null
+  confidence: 0.35
+  classes: []
+  interval: 1
+
+motion:
+  enabled: true
+  method: mog2
+  var_threshold: 32.0
+  # 【关键改】0.0 -> 0.01。手持拍摄下冻结背景会让「移动过的展品/人离开的位置」
+  # 永久残留为前景 ghost，每个 ghost 都是一条新轨迹的出生地。
+  learning_rate: 0.01
+  warmup_frames: 30
+  warmup_rate: 0.05
+  # 【缩放】indoor-640 的 1200 x 3.0 = 3600（≈57x57 @ 720x1280）。
+  min_area_px: 3600.0
+  # 【缩放】18 x ~1.7 = 30。
+  min_width_px: 30
+  min_height_px: 30
+  # 竖屏近景人物可占 25%~30% 画面，0.25 会误杀近景目标。
+  max_area_ratio: 0.3
+  blur_kernel: 5
+  median_kernel: 3
+  temporal_frames: 2
+  interval: 1
+  min_aspect: 0.3
+  max_aspect: 3.0
+  min_fill_ratio: 0.35
+  merge_iou: 0.35
+  merge_gap_px: 0.0
+  nms_iou: 0.45
+  nms_containment: 0.6
+  min_consecutive: 3
+  # 【缩放】10 x 1.5 ≈ 15（像素域随分辨率放大）。
+  min_motion_px: 15.0
+  static_iou: 0.95
+  static_frames: 20
+  morph_kernel: 5
+  # P1 守护参数（显式写出便于现场调）。
+  max_fg_ratio: 0.25
+  burst_recover_frames: 3
+  min_quality: 0.45
+  merge_growth: 3.0
+  max_drift_px: 0.0
+  pixels_per_meter: null
+  small_max_m: 0.5
+  large_min_m: 2.0
+
+display:
+  enabled: true
+  show_trails: true
+  show_labels: true
+  show_hud: true
+  trail_fade: true
+  window_name: "OpenCV MOT"
+
+output:
+  csv_path: null
+  video_path: null
+  append: false
+
+web:
+  host: "127.0.0.1"
+  port: 8000
+  max_sessions: 4
+  stream_fps: 10.0
+  upload_dir: null
+  max_upload_bytes: 2000000000
