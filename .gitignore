@@ -53,7 +53,6 @@ yolov*.pt
 Thumbs.db
 .trae/
 
-
 # Local config overrides
 configs/local.yaml
 .env
