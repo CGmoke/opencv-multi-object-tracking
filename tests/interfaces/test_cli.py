@@ -155,12 +155,24 @@ class TestBuildConfig:
         assert config.motion.interval == 4
         assert config.motion.pixels_per_meter == 120
 
+    def test_motion_backend_flags(self):
+        args = build_parser().parse_args(
+            ["--motion", "--motion-method", "knn", "--motion-knn-dist2", "625"]
+        )
+        config = build_config(args)
+        assert config.motion.method == "knn"
+        assert config.motion.dist2_threshold == 625
+
     def test_motion_box_merge_and_nms_flags(self):
         args = build_parser().parse_args(
             [
                 "--motion",
                 "--motion-min-fill",
                 "0.25",
+                "--motion-blur",
+                "7",
+                "--motion-median",
+                "3",
                 "--motion-merge-iou",
                 "0.2",
                 "--motion-merge-gap",
@@ -175,6 +187,8 @@ class TestBuildConfig:
         )
         config = build_config(args)
         assert config.motion.min_fill_ratio == 0.25
+        assert config.motion.blur_kernel == 7
+        assert config.motion.median_kernel == 3
         assert config.motion.merge_iou == 0.2
         assert config.motion.merge_gap_px == 2
         assert config.motion.nms_iou == 0.5

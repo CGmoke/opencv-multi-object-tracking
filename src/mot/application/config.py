@@ -40,6 +40,9 @@ MAX_CONFIG_BYTES = 1_000_000
 #: 检测器后端枚举；``none`` 表示禁用检测（默认）。
 DETECTOR_BACKENDS: Tuple[str, ...] = ("none", "yolo")
 
+#: 运动检测的背景建模后端（对应 ``MotionDetector(method=...)``）。
+BACKGROUND_METHODS: Tuple[str, ...] = ("mog2", "knn")
+
 
 # ---------------------------------------------------------------------------
 # 校验辅助
@@ -82,6 +85,14 @@ def _as_float(value: Any, name: str, minimum: float, maximum: float) -> float:
         raise ConfigError(f"{name} must be finite, got {value!r}")
     if not minimum <= number <= maximum:
         raise ConfigError(f"{name} must be within [{minimum}, {maximum}], got {number}")
+    return number
+
+
+def _as_kernel(value: Any, name: str, maximum: int = 99) -> int:
+    """滤波核边长：``0`` 关闭，否则必须是奇数（OpenCV 要求）。"""
+    number = _as_int(value, name, 0, maximum)
+    if number and number % 2 == 0:
+        raise ConfigError(f"{name} must be 0 (off) or an odd number, got {number}")
     return number
 
 
@@ -239,10 +250,13 @@ class MotionConfig:
     """自动运动检测配置（无需检测器权重，基于背景建模）。
 
     关键调参项：
-        * ``var_threshold``：灵敏度，越小越敏感；
+        * ``method``：背景建模后端（``mog2`` / ``knn``），均关闭阴影检测；
+        * ``var_threshold``：MOG2 灵敏度，越小越敏感（默认 25，高于 OpenCV 默认 16）；
+        * ``dist2_threshold``：KNN 的平方距离阈值（仅 ``method="knn"`` 生效）；
         * ``min_area_px`` / ``min_width_px`` / ``min_height_px``：最小目标尺寸阈值；
         * ``min_motion_px``：位移门限，用于排除静止物体；
         * ``min_consecutive``：连续命中帧数，用于抑制噪点；
+        * ``blur_kernel`` / ``median_kernel``：输入灰度图的高斯 / 中值滤波核（压噪）；
         * ``min_fill_ratio``：轮廓填充率下限，剔中空/破碎的局部特征；
         * ``merge_iou`` / ``merge_gap_px``：同一物体碎片框的合并条件（间隙默认 0，
           只合并重叠/相接的框，避免误合并相邻物体）；
@@ -251,8 +265,10 @@ class MotionConfig:
     """
 
     enabled: bool = False
+    method: str = "mog2"
     history: int = 200
-    var_threshold: float = 16.0
+    var_threshold: float = 25.0
+    dist2_threshold: float = 400.0
     learning_rate: float = 0.0
     warmup_frames: int = 20
     warmup_rate: float = 0.05
@@ -260,6 +276,8 @@ class MotionConfig:
     min_width_px: int = 8
     min_height_px: int = 8
     max_area_ratio: float = 0.6
+    blur_kernel: int = 5
+    median_kernel: int = 0
     min_fill_ratio: float = 0.0
     merge_iou: float = 0.15
     merge_gap_px: float = 0.0
@@ -275,8 +293,17 @@ class MotionConfig:
 
     def validate(self) -> None:
         self.enabled = _require_bool(self.enabled, "motion.enabled")
+        backend = str(self.method).strip().lower()
+        if backend not in BACKGROUND_METHODS:
+            raise ConfigError(
+                f"motion.method must be one of {BACKGROUND_METHODS}, got {self.method!r}"
+            )
+        self.method = backend
         self.history = _as_int(self.history, "motion.history", 1, 100_000)
         self.var_threshold = _as_float(self.var_threshold, "motion.var_threshold", 1e-6, 255.0)
+        self.dist2_threshold = _as_float(
+            self.dist2_threshold, "motion.dist2_threshold", 1e-6, 1e9
+        )
         self.learning_rate = _as_float(self.learning_rate, "motion.learning_rate", 0.0, 1.0)
         self.warmup_frames = _as_int(self.warmup_frames, "motion.warmup_frames", 0, 100_000)
         self.warmup_rate = _as_float(self.warmup_rate, "motion.warmup_rate", 1e-6, 1.0)
@@ -284,6 +311,8 @@ class MotionConfig:
         self.min_width_px = _as_int(self.min_width_px, "motion.min_width_px", 1, 100_000)
         self.min_height_px = _as_int(self.min_height_px, "motion.min_height_px", 1, 100_000)
         self.max_area_ratio = _as_float(self.max_area_ratio, "motion.max_area_ratio", 1e-6, 1.0)
+        self.blur_kernel = _as_kernel(self.blur_kernel, "motion.blur_kernel")
+        self.median_kernel = _as_kernel(self.median_kernel, "motion.median_kernel")
         self.min_fill_ratio = _as_float(self.min_fill_ratio, "motion.min_fill_ratio", 0.0, 1.0)
         self.merge_iou = _as_float(self.merge_iou, "motion.merge_iou", 0.0, 1.0)
         self.merge_gap_px = _as_float(self.merge_gap_px, "motion.merge_gap_px", 0.0, 1e9)
@@ -463,6 +492,7 @@ class AppConfig:
 
 
 __all__ = [
+    "BACKGROUND_METHODS",
     "DETECTOR_BACKENDS",
     "MAX_CONFIG_BYTES",
     "AppConfig",

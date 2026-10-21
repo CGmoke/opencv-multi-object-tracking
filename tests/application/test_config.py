@@ -189,6 +189,9 @@ class TestMotionSection:
     def test_defaults_are_disabled(self):
         motion = AppConfig.defaults().motion
         assert motion.enabled is False
+        assert motion.method == "mog2"
+        assert motion.var_threshold == 25.0
+        assert motion.dist2_threshold == 400.0
         assert motion.min_area_px == 200.0
         assert motion.pixels_per_meter is None
 
@@ -196,11 +199,16 @@ class TestMotionSection:
         "payload",
         [
             "  var_threshold: 0\n",
+            "  method: yolo\n",
+            "  dist2_threshold: 0\n",
             "  min_area_px: -1\n",
             "  min_width_px: 0\n",
             "  min_consecutive: 0\n",
             "  min_motion_px: -1\n",
             "  max_area_ratio: 0\n",
+            "  blur_kernel: 4\n",
+            "  median_kernel: 2\n",
+            "  blur_kernel: -1\n",
             "  min_fill_ratio: -0.1\n",
             "  merge_iou: 1.1\n",
             "  merge_gap_px: -1\n",

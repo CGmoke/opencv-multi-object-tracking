@@ -45,6 +45,30 @@ def test_implements_the_detector_port():
     assert isinstance(MotionDetector(), Detector)
 
 
+@pytest.mark.parametrize("method", ["mog2", "knn"])
+def test_both_background_methods_detect_a_moving_object(method):
+    detector = MotionDetector(warmup_frames=20, method=method)
+    warm_up(detector)
+    detections = feed_moving(detector)
+    assert detections, f"{method} should detect the moving object"
+    assert detections[0].bbox[2] >= 30
+
+
+def test_method_is_normalised_to_lower_case():
+    assert MotionDetector(method="KNN").method == "knn"
+
+
+def test_reset_rebuilds_the_same_backend():
+    detector = MotionDetector(method="knn", dist2_threshold=625)
+    detector.reset()
+    assert detector.method == "knn"
+    assert detector._background.getDist2Threshold() == pytest.approx(625)
+
+
+def test_shadow_detection_is_disabled_by_default():
+    assert MotionDetector()._background.getDetectShadows() is False
+
+
 def test_opaque_frames_are_ignored():
     detector = MotionDetector()
     assert detector(None, 0.0) == []
@@ -185,14 +209,52 @@ def test_min_fill_ratio_rejects_thin_fragments():
     assert strict._find_candidates(mask, WIDTH, HEIGHT) == []
 
 
+def test_preprocessing_converts_to_greyscale():
+    detector = MotionDetector(warmup_frames=0)
+    prepared = detector._prepare(with_box(10, 10))
+    assert prepared.ndim == 2
+    assert prepared.dtype == np.uint8
+    assert prepared.shape == (HEIGHT, WIDTH)
+
+
+def test_gaussian_blur_reduces_pixel_level_noise():
+    rng = np.random.default_rng(0)
+    frame = np.full((HEIGHT, WIDTH, 3), 120, dtype=np.uint8)
+    frame = np.clip(frame + rng.normal(0, 20, frame.shape), 0, 255).astype(np.uint8)
+    raw = MotionDetector(warmup_frames=0, blur_kernel=0)._prepare(frame)
+    smooth = MotionDetector(warmup_frames=0, blur_kernel=5)._prepare(frame)
+    assert cv2.Laplacian(smooth, cv2.CV_32F).var() < cv2.Laplacian(raw, cv2.CV_32F).var()
+
+
+def test_median_filter_removes_salt_and_pepper():
+    frame = np.full((HEIGHT, WIDTH, 3), 100, dtype=np.uint8)
+    frame[::7, ::5] = 255  # 孤立亮点
+    frame[::11, ::9] = 0  # 孤立暗点
+    raw = MotionDetector(warmup_frames=0, blur_kernel=0)._prepare(frame)
+    median = MotionDetector(warmup_frames=0, blur_kernel=0, median_kernel=3)._prepare(frame)
+    assert int(np.count_nonzero(median == 255)) < int(np.count_nonzero(raw == 255))
+    assert int(np.count_nonzero(median == 0)) < int(np.count_nonzero(raw == 0))
+
+
+def test_zero_kernels_disable_the_filters():
+    frame = with_box(10, 10)
+    prepared = MotionDetector(warmup_frames=0, blur_kernel=0, median_kernel=0)._prepare(frame)
+    assert np.array_equal(prepared, cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
         {"history": 0},
+        {"method": "yolo"},
         {"var_threshold": 0},
+        {"dist2_threshold": 0},
         {"min_area_px": -1},
         {"min_width_px": 0},
         {"max_area_ratio": 0.0},
+        {"blur_kernel": -1},
+        {"blur_kernel": 4},
+        {"median_kernel": 2},
         {"min_fill_ratio": -0.1},
         {"min_fill_ratio": 1.1},
         {"merge_iou": -0.1},

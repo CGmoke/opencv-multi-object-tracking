@@ -50,8 +50,14 @@ motion:
   # Enable with `--motion` or set enabled: true. When both detector and motion are
   # configured, the detector wins.
   enabled: false
+  # Background subtractor: mog2 (fast, default) or knn (steadier on textured scenes).
+  # Both run with detectShadows disabled.
+  method: mog2
   # Sensitivity: smaller = more sensitive to small intensity changes.
-  var_threshold: 16.0
+  # 25 is deliberately above OpenCV's default 16 to suppress texture noise.
+  var_threshold: 25.0
+  # KNN squared-distance threshold (only used when method: knn); raise to 625 for noise.
+  dist2_threshold: 400.0
   # Background learning rate after warm-up. 0.0 freezes the model so a moving object
   # stays fully in the foreground (accurate boxes); raise it if lighting drifts.
   learning_rate: 0.0
@@ -63,6 +69,13 @@ motion:
   min_height_px: 8
   # Reject foreground covering more than this fraction of the frame (scene-wide change).
   max_area_ratio: 0.6
+  # Input denoising before background modelling (grayscale is created first):
+  # Gaussian blur kernel (odd, 0 = off). Sensor grain / compression noise would
+  # otherwise be amplified into false foreground blobs.
+  blur_kernel: 5
+  # Median blur kernel (odd, 0 = off). Stronger against salt/pepper and JPEG
+  # artifacts; 3 is usually enough.
+  median_kernel: 0
   # Reject hollow/fragmented contours below this contour/box fill ratio (0 = off).
   min_fill_ratio: 0.0
   # Fragment merging: boxes of the same object (IoU >= merge_iou, or edge gap

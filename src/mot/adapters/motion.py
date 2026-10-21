@@ -3,6 +3,8 @@
 用 OpenCV 背景建模（MOG2）从视频流里**自动发现移动物体**，替代手工框选或需要外部
 权重的 YOLO：无需模型文件，开箱即用。多层过滤用于排除静态干扰与噪点：
 
+0. **输入预处理**：灰度化 + 小核高斯模糊（可选中值滤波）。传感器颗粒、压缩块噪声与
+   微小纹理是后续误检的放大器，在进入背景模型前先压掉，成本极低；
 1. 背景建模本身把静止内容学成背景（静止物体不产生前景）；
 2. 形态学开运算 + 膨胀：去掉椒盐噪点、合并碎裂区域；
 3. **最小面积 / 最小边长 / 填充率**：滤掉小噪点、细长纹理与中空碎片；
@@ -33,13 +35,20 @@ import numpy as np
 from mot.domain.models import Detection, clip_bbox
 from mot.domain.postprocess import merge_fragments, nms
 
+#: 支持的背景建模后端。
+BACKGROUND_METHODS: Tuple[str, ...] = ("mog2", "knn")
+
 
 class MotionDetector:
-    """基于 MOG2 背景建模的运动检测器。
+    """基于背景建模（MOG2 / KNN）的运动检测器。
 
     Args:
+        method: 背景建模算法：``"mog2"``（默认，快）或 ``"knn"``（对高频纹理更稳一些）。
         history: 背景模型的历史帧数（越长越稳，越短适应越快）。
-        var_threshold: 判定前景的方差阈值；**越小越敏感**（默认 16）。
+        var_threshold: MOG2 的方差阈值；**越小越敏感**。默认 ``25``（比 OpenCV 默认
+            16 高），配合输入模糊可压掉纹理上的细小波动而不丢掉真实目标。
+        dist2_threshold: KNN 的平方距离阈值（仅 ``method="knn"`` 生效），默认 ``400``，
+            噪点多时调高到 ``625`` 左右。
         learning_rate: 背景学习率（默认 0.0，即预热后**冻结**背景）。冻结的好处是运动
             物体在移动期间**整体**保持为前景，从而得到接近真实的包围盒与尺寸；静止
             物体同样会残留前景，但会被 ``min_motion_px`` 位移门限滤掉。场景缓慢变化
@@ -47,6 +56,10 @@ class MotionDetector:
         min_area_px: 最小前景面积（像素）；小于该值视为噪点。
         min_width_px / min_height_px: 包围框最小边长（像素）。
         max_area_ratio: 包围框面积 / 画面面积的上限；超过视为整屏突变。
+        blur_kernel: 高斯模糊核边长（奇数，默认 ``5``；``0`` 表示关闭）。在灰度图上
+            平滑像素级高频噪声，避免传感器颗粒被背景模型判成前景。
+        median_kernel: 中值滤波核边长（奇数，默认 ``0`` 关闭）。对椒盐/压缩噪点比高斯
+            更强，代价是轻微抹掉细小纹理；``3`` 通常足够。
         min_fill_ratio: 轮廓面积 / 包围框面积的下限；用于剔除中空、破碎的局部特征
             （``0`` 表示关闭）。
         merge_iou: 碎片合并的 IoU 阈值；重叠超过该值的局部框合并为一个整体框。
@@ -74,13 +87,17 @@ class MotionDetector:
     def __init__(
         self,
         *,
+        method: str = "mog2",
         history: int = 200,
-        var_threshold: float = 16.0,
+        var_threshold: float = 25.0,
+        dist2_threshold: float = 400.0,
         learning_rate: float = 0.0,
         min_area_px: float = 200.0,
         min_width_px: int = 8,
         min_height_px: int = 8,
         max_area_ratio: float = 0.6,
+        blur_kernel: int = 5,
+        median_kernel: int = 0,
         min_fill_ratio: float = 0.0,
         merge_iou: float = 0.15,
         merge_gap_px: float = 0.0,
@@ -98,14 +115,22 @@ class MotionDetector:
     ) -> None:
         if int(history) < 1:
             raise ValueError(f"history must be >= 1, got {history}")
+        backend = str(method).strip().lower()
+        if backend not in BACKGROUND_METHODS:
+            raise ValueError(f"method must be one of {BACKGROUND_METHODS}, got {method!r}")
         if float(var_threshold) <= 0:
             raise ValueError(f"var_threshold must be > 0, got {var_threshold}")
+        if float(dist2_threshold) <= 0:
+            raise ValueError(f"dist2_threshold must be > 0, got {dist2_threshold}")
         if float(min_area_px) < 0:
             raise ValueError(f"min_area_px must be >= 0, got {min_area_px}")
         if int(min_width_px) < 1 or int(min_height_px) < 1:
             raise ValueError(f"min box sides must be >= 1, got {min_width_px}x{min_height_px}")
         if not 0.0 < float(max_area_ratio) <= 1.0:
             raise ValueError(f"max_area_ratio must be within (0, 1], got {max_area_ratio}")
+        for name, value in (("blur_kernel", blur_kernel), ("median_kernel", median_kernel)):
+            if int(value) < 0 or (int(value) != 0 and int(value) % 2 == 0):
+                raise ValueError(f"{name} must be 0 or a positive odd number, got {value}")
         if not 0.0 <= float(min_fill_ratio) <= 1.0:
             raise ValueError(f"min_fill_ratio must be within [0, 1], got {min_fill_ratio}")
         if not 0.0 <= float(merge_iou) <= 1.0:
@@ -129,6 +154,8 @@ class MotionDetector:
         self.min_width_px = int(min_width_px)
         self.min_height_px = int(min_height_px)
         self.max_area_ratio = float(max_area_ratio)
+        self.blur_kernel = int(blur_kernel)
+        self.median_kernel = int(median_kernel)
         self.min_fill_ratio = float(min_fill_ratio)
         self.merge_iou = float(merge_iou)
         self.merge_gap_px = float(merge_gap_px)
@@ -137,6 +164,11 @@ class MotionDetector:
         self.min_consecutive = int(min_consecutive)
         self.min_motion_px = float(min_motion_px)
         self.label = str(label)
+        self.method = backend
+        self.var_threshold = float(var_threshold)
+        self.dist2_threshold = float(dist2_threshold)
+        self._history = int(history)
+        self._detect_shadows = bool(detect_shadows)
         self._morph_kernel = int(morph_kernel)
         self._persist_radius = float(persist_radius_px)
         self._max_candidates = max(1, int(max_candidates))
@@ -145,12 +177,22 @@ class MotionDetector:
         self._frame_count = 0
         self._size: Optional[Tuple[int, int]] = None  # (width, height)
         self._candidates: List[Tuple[float, float, int, float, float]] = []
-        self._background = cv2.createBackgroundSubtractorMOG2(
-            history=int(history),
-            varThreshold=float(var_threshold),
-            detectShadows=bool(detect_shadows),
-        )
+        self._background = self._make_background()
         self._learning_rate = float(learning_rate)
+
+    def _make_background(self) -> Any:
+        """按 ``method`` 新建背景模型；``reset`` / 分辨率变化时复用同一组参数。"""
+        if self.method == "knn":
+            return cv2.createBackgroundSubtractorKNN(
+                history=self._history,
+                dist2Threshold=self.dist2_threshold,
+                detectShadows=self._detect_shadows,
+            )
+        return cv2.createBackgroundSubtractorMOG2(
+            history=self._history,
+            varThreshold=self.var_threshold,
+            detectShadows=self._detect_shadows,
+        )
 
     # -- Detector 端口 ---------------------------------------------------
     def __call__(self, frame: Any, timestamp: float = 0.0) -> List[Detection]:
@@ -173,9 +215,12 @@ class MotionDetector:
         # 预热期用温和学习率建立初始背景，且不输出检测；预热后按 learning_rate 更新
         # （默认冻结），使运动物体整体保持为前景。
         rate = self._warmup_rate if warming else self._learning_rate
+        # 先压噪再进背景模型：灰度化 → 高斯（→ 中值）。预热期也用同样的预处理，
+        # 保证背景与检测阶段的输入分布一致。
+        prepared = self._prepare(frame)
         # 必须用关键字传 learningRate：第二个位置参数在部分 OpenCV 版本里被当作
         # fgmask，导致学习率静默失效（物体躯干被吸收，只剩前沿窄条）。
-        mask = self._background.apply(frame, learningRate=rate)
+        mask = self._background.apply(prepared, learningRate=rate)
         if warming:
             return []
 
@@ -197,14 +242,24 @@ class MotionDetector:
         """清空候选状态；``keep_background=False`` 时同时重建背景模型。"""
         self._candidates.clear()
         if not keep_background:
-            self._background = cv2.createBackgroundSubtractorMOG2(
-                history=self._background.getHistory(),
-                varThreshold=self._background.getVarThreshold(),
-                detectShadows=False,
-            )
+            self._background = self._make_background()
             self._frame_count = 0
 
     # -- 内部实现 --------------------------------------------------------
+    def _prepare(self, frame: np.ndarray) -> np.ndarray:
+        """输入预处理：灰度化 + 高斯模糊（可选 + 中值滤波）。
+
+        只压高频噪声，不做尺寸缩放：缩小会让小目标消失，放大则无收益。
+        """
+        gray = frame
+        if gray.ndim == 3:
+            gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+        if self.blur_kernel > 1:
+            gray = cv2.GaussianBlur(gray, (self.blur_kernel, self.blur_kernel), 0)
+        if self.median_kernel > 1:
+            gray = cv2.medianBlur(gray, self.median_kernel)
+        return gray
+
     def _clean_mask(self, mask: np.ndarray) -> np.ndarray:
         """形态学清理：开运算去噪点，膨胀合并同一物体的碎裂区域。"""
         if self._morph_kernel <= 1:
@@ -304,4 +359,4 @@ class MotionDetector:
         return matched
 
 
-__all__ = ["MotionDetector"]
+__all__ = ["BACKGROUND_METHODS", "MotionDetector"]

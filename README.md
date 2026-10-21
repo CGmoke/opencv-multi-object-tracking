@@ -149,11 +149,15 @@ mot-track --dump-config --iou-threshold 0.4 --tracker kcf
 | `--dump-config` | — | 打印最终配置并退出 |
 | `--verbose, -v` | 关 | 调试日志 |
 | `--motion` | 关 | 自动检测移动物体（背景建模，无需模型权重） |
-| `--motion-sensitivity` | `16` | 背景差异阈值，**越小越敏感** |
+| `--motion-method` | `mog2` | 背景建模后端：`mog2`（快）或 `knn`（纹理场景更稳） |
+| `--motion-sensitivity` | `25` | MOG2 方差阈值，**越小越敏感** |
+| `--motion-knn-dist2` | `400` | KNN 平方距离阈值（仅 `--motion-method knn`） |
 | `--motion-min-area` | `200` | 最小前景面积（像素，噪点过滤） |
 | `--motion-min-size` | `8` | 最小目标边长（像素，尺寸阈值） |
 | `--motion-min-motion` | `6` | 最小位移（像素，排除静止物体） |
 | `--motion-min-consecutive` | `2` | 连续命中帧数（抑制单帧噪点） |
+| `--motion-blur` | `5` | 灰度图高斯模糊核（奇数，`0` 关闭；压制传感器颗粒） |
+| `--motion-median` | `0` | 中值滤波核（奇数，`0` 关闭；椒盐噪声明显时设 `3`） |
 | `--motion-min-fill` | `0` | 轮廓填充率下限（剔除中空/破碎碎片，`0` 关闭） |
 | `--motion-merge-iou` | `0.15` | 碎片框合并的 IoU 阈值（同一物体拆成多块时合并） |
 | `--motion-merge-gap` | `0` | 碎片合并的最大正间隙（像素，`0` 关闭间隙合并） |
@@ -241,7 +245,8 @@ python3 -m mot --source 0 --motion --motion-sensitivity 10 --motion-min-area 400
 
 | 过滤 | 参数 | 作用 |
 | --- | --- | --- |
-| 背景建模 | `var_threshold` | 与背景一致的内容不产生前景（静止物体天然被忽略） |
+| 输入预处理 | `blur_kernel` / `median_kernel` | 灰度化后高斯（默认 5×5）/ 中值滤波，压掉传感器颗粒与压缩噪点 |
+| 背景建模 | `method` / `var_threshold` | MOG2（或 KNN，均 `detectShadows=False`）把静止内容学成背景；阈值默认 25 比 OpenCV 默认 16 更抗纹理抖动 |
 | 最小面积 | `min_area_px` | 去掉小噪点 |
 | 最小边长 | `min_width_px` / `min_height_px` | 去掉细长纹理 |
 | 最大占比 | `max_area_ratio` | 去掉整屏光照突变 |

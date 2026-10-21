@@ -30,7 +30,7 @@ from mot.adapters.trackers import (
     update_tracker,
 )
 from mot.adapters.ui import InteractiveSession
-from mot.application.config import DETECTOR_BACKENDS, AppConfig
+from mot.application.config import BACKGROUND_METHODS, DETECTOR_BACKENDS, AppConfig
 from mot.application.errors import ConfigError, MotError
 from mot.application.pipeline import MOTPipeline
 from mot.application.session import SessionStats, TrackingSession
@@ -150,11 +150,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="auto-detect moving objects by background modelling (no model weights needed)",
     )
     parser.add_argument(
+        "--motion-method",
+        dest="motion_method",
+        choices=list(BACKGROUND_METHODS),
+        default=None,
+        help="background modelling backend (mog2 is faster, knn is steadier on texture)",
+    )
+    parser.add_argument(
         "--motion-sensitivity",
         dest="motion_var_threshold",
         type=float,
         default=None,
-        help="background diff threshold; smaller = more sensitive",
+        help="MOG2 variance threshold; smaller = more sensitive (default 25)",
+    )
+    parser.add_argument(
+        "--motion-knn-dist2",
+        dest="motion_knn_dist2",
+        type=float,
+        default=None,
+        help="KNN squared-distance threshold used when --motion-method knn (default 400)",
     )
     parser.add_argument(
         "--motion-min-area",
@@ -190,6 +204,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="minimum contour/bounding-box fill ratio (0 disables; rejects hollow fragments)",
+    )
+    parser.add_argument(
+        "--motion-blur",
+        dest="motion_blur",
+        type=int,
+        default=None,
+        help="Gaussian blur kernel on the grey frame (odd, 0 = off; default 5)",
+    )
+    parser.add_argument(
+        "--motion-median",
+        dest="motion_median",
+        type=int,
+        default=None,
+        help="median blur kernel for salt/pepper noise (odd, 0 = off; try 3)",
     )
     parser.add_argument(
         "--motion-merge-iou",
@@ -319,8 +347,12 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.detector.confidence = args.detector_conf
     if getattr(args, "motion", False):
         config.motion.enabled = True
+    if getattr(args, "motion_method", None) is not None:
+        config.motion.method = args.motion_method
     if getattr(args, "motion_var_threshold", None) is not None:
         config.motion.var_threshold = args.motion_var_threshold
+    if getattr(args, "motion_knn_dist2", None) is not None:
+        config.motion.dist2_threshold = args.motion_knn_dist2
     if getattr(args, "motion_min_area", None) is not None:
         config.motion.min_area_px = args.motion_min_area
     if getattr(args, "motion_min_size", None) is not None:
@@ -332,6 +364,10 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.motion.min_consecutive = args.motion_min_consecutive
     if getattr(args, "motion_min_fill", None) is not None:
         config.motion.min_fill_ratio = args.motion_min_fill
+    if getattr(args, "motion_blur", None) is not None:
+        config.motion.blur_kernel = args.motion_blur
+    if getattr(args, "motion_median", None) is not None:
+        config.motion.median_kernel = args.motion_median
     if getattr(args, "motion_merge_iou", None) is not None:
         config.motion.merge_iou = args.motion_merge_iou
     if getattr(args, "motion_merge_gap", None) is not None:
@@ -409,13 +445,17 @@ def _build_motion(config: AppConfig) -> Optional[Any]:
     from mot.adapters.motion import MotionDetector
 
     return MotionDetector(
+        method=config.motion.method,
         history=config.motion.history,
         var_threshold=config.motion.var_threshold,
+        dist2_threshold=config.motion.dist2_threshold,
         learning_rate=config.motion.learning_rate,
         min_area_px=config.motion.min_area_px,
         min_width_px=config.motion.min_width_px,
         min_height_px=config.motion.min_height_px,
         max_area_ratio=config.motion.max_area_ratio,
+        blur_kernel=config.motion.blur_kernel,
+        median_kernel=config.motion.median_kernel,
         min_fill_ratio=config.motion.min_fill_ratio,
         merge_iou=config.motion.merge_iou,
         merge_gap_px=config.motion.merge_gap_px,
