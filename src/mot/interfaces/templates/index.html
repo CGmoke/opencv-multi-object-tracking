@@ -31,6 +31,12 @@
 
   <main id="grid"></main>
 
+  <div id="lightbox" class="lightbox" role="dialog" aria-label="放大画面" hidden>
+    <button id="lightbox-close" class="lightbox-close" type="button" aria-label="退出放大">×</button>
+    <img id="lightbox-img" alt="放大画面">
+    <p class="lightbox-tip">点击画面或按 Esc 退出放大</p>
+  </div>
+
   <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

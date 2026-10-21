@@ -2,12 +2,39 @@
 
 const grid = document.getElementById("grid");
 const notice = document.getElementById("notice");
+const lightbox = document.getElementById("lightbox");
+const lightboxImg = document.getElementById("lightbox-img");
 const cards = new Map();
 const browserFeeds = new Map();
+let lightboxSessionId = null;
 
 function say(text) {
   notice.textContent = text || "";
 }
+
+function openLightbox(sessionId) {
+  lightboxSessionId = sessionId;
+  lightboxImg.src = `/stream/${sessionId}.mjpeg`;
+  lightbox.hidden = false;
+  document.body.classList.add("lightbox-open");
+}
+
+function closeLightbox() {
+  if (lightbox.hidden) return;
+  lightbox.hidden = true;
+  lightboxImg.removeAttribute("src"); // 断开放大镜的 MJPEG 连接
+  document.body.classList.remove("lightbox-open");
+  lightboxSessionId = null;
+}
+
+// 浮层在预览图的 mouseup 中打开：若用 click 关闭，同一次点击会立刻把浮层关掉
+// （浏览器在派发 click 时按当前位置命中测试）。改用 pointerdown，它必定早于
+// 打开浮层的 mouseup，因此不会自触发。
+lightbox.addEventListener("pointerdown", closeLightbox);
+document.getElementById("lightbox-close").addEventListener("click", closeLightbox);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeLightbox();
+});
 
 async function api(path, options) {
   const response = await fetch(path, options);
@@ -61,10 +88,11 @@ function makeCard(session) {
     <img class="preview" alt="实时画面">
     <dl class="stats"></dl>
     <div class="paths"></div>
-    <div class="hint">在画面上拖拽可框选新目标（下一帧生效）</div>
+    <div class="hint">拖拽可框选新目标（下一帧生效）· 单击放大画面</div>
     <div class="error"></div>`;
   const img = card.querySelector(".preview");
   img.src = `/stream/${session.id}.mjpeg`;
+  img.title = "单击放大，拖拽框选目标";
 
   card.querySelector(".stop").addEventListener("click", async () => {
     try {
@@ -97,13 +125,13 @@ function makeCard(session) {
     refresh();
   });
 
-  bindDragToAddBox(img, session.id);
+  bindDragToAddBox(img, session.id, () => openLightbox(session.id));
   grid.appendChild(card);
   cards.set(session.id, card);
   return card;
 }
 
-function bindDragToAddBox(img, sessionId) {
+function bindDragToAddBox(img, sessionId, onTap) {
   let start = null;
   const toImageCoords = (event) => {
     const rect = img.getBoundingClientRect();
@@ -124,7 +152,11 @@ function bindDragToAddBox(img, sessionId) {
     const [x2, y2] = toImageCoords(event);
     start = null;
     const bbox = [Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1)];
-    if (bbox[2] < 8 || bbox[3] < 8) return;
+    if (bbox[2] < 8 || bbox[3] < 8) {
+      // 没有拖动 → 视为单击，放大画面
+      if (onTap) onTap();
+      return;
+    }
     try {
       await api(`/api/sessions/${sessionId}/box`, {
         method: "POST",
@@ -165,6 +197,7 @@ async function refresh() {
     const live = new Set(data.sessions.map((session) => session.id));
     cards.forEach((card, id) => {
       if (!live.has(id)) {
+        if (lightboxSessionId === id) closeLightbox();
         dropFeed(id);
         card.remove();
         cards.delete(id);
