@@ -12,6 +12,7 @@ import pytest
 from mot.domain.errors import ValidationError
 from mot.domain.geometry import (
     box_iou,
+    box_scale_change,
     boxes_to_list,
     describe,
     intersection_area,
@@ -113,3 +114,16 @@ def test_describe_formats_box():
 
 def test_matrix_is_float64():
     assert iou_matrix([(0, 0, 10, 10)], [(0, 0, 10, 10)]).dtype == np.float64
+
+
+class TestBoxScaleChange:
+    def test_identical_boxes_have_ratio_one(self):
+        assert box_scale_change((0, 0, 10, 10), (0, 0, 10, 10)) == 1.0
+
+    def test_symmetric_ratio_is_always_at_least_one(self):
+        assert box_scale_change((0, 0, 10, 10), (0, 0, 20, 10)) == 2.0
+        assert box_scale_change((0, 0, 20, 10), (0, 0, 10, 10)) == 2.0
+
+    def test_the_largest_axis_ratio_wins(self):
+        assert box_scale_change((0, 0, 10, 10), (0, 0, 10, 40)) == 4.0
+        assert box_scale_change((0, 0, 30, 8), (0, 0, 20, 20)) == pytest.approx(2.5)

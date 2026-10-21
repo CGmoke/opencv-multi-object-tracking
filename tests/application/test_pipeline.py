@@ -136,6 +136,17 @@ class TestDetectorMode:
         )
         assert len(result.created) == 2
 
+    def test_equal_confidence_prefers_the_whole_box(self, make_manager, pool):
+        pipeline = make_pipeline(make_manager, pool)
+        result = pipeline.step(
+            None,
+            extra_detections=[
+                Detection((10, 10, 20, 10), confidence=1.0),  # 局部框（先入列）
+                Detection((10, 10, 20, 20), confidence=1.0),  # 整体框
+            ],
+        )
+        assert [detection.bbox for detection in result.detections] == [(10.0, 10.0, 20.0, 20.0)]
+
     def test_invalid_detector_is_rejected(self, make_manager, pool):
         with pytest.raises(TypeError):
             MOTPipeline(make_manager(pool), detector="not-callable")
@@ -143,6 +154,58 @@ class TestDetectorMode:
     def test_invalid_interval_is_rejected(self, make_manager, pool):
         with pytest.raises(ValidationError):
             MOTPipeline(make_manager(pool), detection_interval=0)
+
+
+class TestTrackSanityCheck:
+    """轨迹二次校验：与轨迹重叠但尺寸突变的检测应被丢弃。"""
+
+    def test_oversized_detection_does_not_replace_the_box(self, make_manager, pool):
+        manager = make_manager(pool)
+        pipeline = MOTPipeline(manager, max_box_change=1.6)
+        pipeline.step(None, extra_detections=[Detection(BOX)])  # 20x20 轨迹
+        result = pipeline.step(None, extra_detections=[Detection((10, 10, 40, 10))])
+        assert result.created == ()
+        assert result.detections == ()
+        assert result.matched == ()
+        assert pipeline.size_rejects == 1
+        assert manager.get(1).bbox == BOX  # 继续使用跟踪器自身的框
+
+    def test_similar_size_detection_still_refreshes_the_track(self, make_manager, pool):
+        manager = make_manager(pool)
+        pipeline = MOTPipeline(manager, max_box_change=1.6)
+        pipeline.step(None, extra_detections=[Detection(BOX)])
+        result = pipeline.step(None, extra_detections=[Detection((11, 10, 21, 20))])
+        assert result.matched == ((0, 0),)
+        assert pipeline.size_rejects == 0
+
+    def test_non_overlapping_new_object_is_not_filtered(self, make_manager, pool):
+        pipeline = MOTPipeline(make_manager(pool), max_box_change=1.6)
+        pipeline.step(None, extra_detections=[Detection(BOX)])
+        result = pipeline.step(None, extra_detections=[Detection((200, 200, 80, 80))])
+        assert result.created == (2,)
+        assert pipeline.size_rejects == 0
+
+    def test_guard_can_be_disabled(self, make_manager, pool):
+        pipeline = MOTPipeline(make_manager(pool), max_box_change=1.0)
+        pipeline.step(None, extra_detections=[Detection(BOX)])
+        result = pipeline.step(None, extra_detections=[Detection((10, 10, 40, 10))])
+        assert pipeline.size_rejects == 0
+        assert len(result.detections) == 1
+
+    def test_lost_tracks_are_exempt_from_the_guard(self, make_manager, pool):
+        manager = make_manager(pool, max_missing=5)
+        pipeline = MOTPipeline(manager, max_box_change=1.6)
+        pipeline.step(None, extra_detections=[Detection(BOX)])
+        pool.trackers[0].alive = False
+        pipeline.step(None)  # 跟踪器丢失 → LOST
+        result = pipeline.step(None, extra_detections=[Detection((10, 10, 40, 10))])
+        assert pipeline.size_rejects == 0
+        assert len(result.detections) == 1
+        assert result.created == ()
+
+    def test_invalid_limit_is_rejected(self, make_manager, pool):
+        with pytest.raises(ValidationError):
+            MOTPipeline(make_manager(pool), max_box_change=0.5)
 
 
 class TestDetectionNormalisation:

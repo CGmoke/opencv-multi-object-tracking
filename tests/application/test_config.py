@@ -103,6 +103,8 @@ class TestValidation:
             ("tracking", "  match_method: magic\n"),
             ("tracking", "  box_smoothing: 0\n"),
             ("tracking", "  box_smoothing: 1.5\n"),
+            ("tracking", "  max_box_change: 0.5\n"),
+            ("tracking", "  max_box_change: 101\n"),
             ("source", "  max_frames: 0\n"),
             ("source", "  loop: 'yes'\n"),
             ("source", "  source: ''\n"),

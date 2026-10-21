@@ -398,7 +398,10 @@ class SessionRegistry:
         )
         detector = _build_detector(config)
         pipeline = MOTPipeline(
-            manager, detector=detector, detection_interval=_detection_interval(config)
+            manager,
+            detector=detector,
+            detection_interval=_detection_interval(config),
+            max_box_change=config.tracking.max_box_change,
         )
 
         out_dir = _output_dir(config)

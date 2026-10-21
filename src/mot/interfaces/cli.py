@@ -126,6 +126,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="EMA alpha for detection boxes: 1 = raw, smaller = steadier but laggier",
     )
     parser.add_argument(
+        "--max-box-change",
+        dest="max_box_change",
+        type=float,
+        default=None,
+        help="drop detections whose box size jumps beyond this ratio vs the track (1 = off)",
+    )
+    parser.add_argument(
         "--match-method",
         choices=list(MATCH_METHODS),
         default=None,
@@ -365,6 +372,8 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.tracking.max_tracks = args.max_tracks
     if getattr(args, "box_smoothing", None) is not None:
         config.tracking.box_smoothing = args.box_smoothing
+    if getattr(args, "max_box_change", None) is not None:
+        config.tracking.max_box_change = args.max_box_change
     if args.detector is not None:
         config.detector.backend = args.detector
     if args.detector_model is not None:
@@ -557,7 +566,10 @@ def run(config: AppConfig) -> int:
         return 2
 
     pipeline = MOTPipeline(
-        manager, detector=detector, detection_interval=_detection_interval(config)
+        manager,
+        detector=detector,
+        detection_interval=_detection_interval(config),
+        max_box_change=config.tracking.max_box_change,
     )
 
     try:

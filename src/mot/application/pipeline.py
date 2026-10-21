@@ -8,6 +8,8 @@
 * ``FrameResult`` 增加 ``timestamp`` 与 ``matched_ids``（G6 / G7）。
 * 检测器首帧即触发（G9，取代“第 interval 帧才首次检测”）。
 * 去重与关联共用 ``TrackManager.iou_threshold``。
+* **轨迹二次校验**：与活跃目标高度重叠、但尺寸相对已有轨迹突变过大的检测会被丢弃，
+  避免同一目标的局部框顶替整体框或派生出新 id。
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from mot.domain.errors import ValidationError
-from mot.domain.geometry import box_iou
+from mot.domain.geometry import box_iou, box_scale_change
 from mot.domain.lifecycle import TrackManager
 from mot.domain.limits import MAX_DETECTIONS
 from mot.domain.models import (
@@ -70,6 +72,9 @@ class MOTPipeline:
         detector: 可选 ``(frame, timestamp) -> Sequence[Detection]``；``None`` 时
             进入手工模式（框来自鼠标或 ``--seed-box``）。
         detection_interval: 每 N 帧跑一次检测器；``1`` 表示每帧。首帧总是立即检测。
+        max_box_change: 轨迹二次校验的尺寸突变上限（默认 ``1.6``）。与活跃目标 IoU
+            达到 ``manager.iou_threshold`` 的检测，若宽或高的相对变化超过该倍率，则
+            视为同一目标的局部框/碎片被丢弃；``1.0`` 关闭该校验。
     """
 
     def __init__(
@@ -77,6 +82,7 @@ class MOTPipeline:
         manager: TrackManager,
         detector: Optional[DetectorFn] = None,
         detection_interval: int = 1,
+        max_box_change: float = 1.6,
     ) -> None:
         if detector is not None and not callable(detector):
             raise TypeError("detector must be callable: (frame, timestamp) -> Sequence[Detection]")
@@ -86,9 +92,18 @@ class MOTPipeline:
                 field="detection_interval",
                 value=detection_interval,
             )
+        if not 1.0 <= float(max_box_change) <= 100.0:
+            raise ValidationError(
+                f"max_box_change must be within [1, 100], got {max_box_change}",
+                field="max_box_change",
+                value=max_box_change,
+            )
         self._manager = manager
         self._detector = detector
         self._detection_interval = int(detection_interval)
+        self.max_box_change = float(max_box_change)
+        self.size_rejects = 0
+        self._warned_size_jump = False
         self._since_detection = 0
         self.frame_count = 0
         self._warned_detector_failure = False
@@ -115,6 +130,7 @@ class MOTPipeline:
             "removed_ids": self._manager.total_removed,
             "spawn_failures": self._manager.spawn_failures,
             "trail_points": sum(len(track.trail) for track in self._manager.tracks),
+            "size_rejects": self.size_rejects,
         }
 
     # -- 单帧 ------------------------------------------------------------
@@ -141,6 +157,7 @@ class MOTPipeline:
                 produced = None
             if produced:
                 detections.extend(self._normalize(produced))
+        detections = self._reject_size_outliers(detections)
         detections = self._dedupe(detections)
         result = self._manager.step(frame, detections)
         return FrameResult(
@@ -212,13 +229,62 @@ class MOTPipeline:
                 )
         return out
 
+    def _reject_size_outliers(self, detections: Sequence[Detection]) -> List[Detection]:
+        """轨迹二次校验：丢弃与活跃目标重叠但尺寸突变的检测。
+
+        典型误检是同一物体的局部框（面积只有整体框的一小部分）或碎片框；它们与
+        已有轨迹 IoU 很高，会被关联成同一 id，随后把整体框替换成局部框。这里在
+        去重/关联之前丢弃这类检测，目标继续由自身跟踪器推进，框尺寸保持稳定。
+
+        只与 ``ACTIVE`` 目标比较：``LOST`` 目标重新出现时尺寸可能已变化，应允许
+        重新捕获。``max_box_change <= 1.0`` 时关闭。
+        """
+        limit = self.max_box_change
+        if limit <= 1.0 or not detections:
+            return list(detections)
+        tracks = self._manager.active_tracks
+        if not tracks:
+            return list(detections)
+
+        kept: List[Detection] = []
+        for detection in detections:
+            best_iou = 0.0
+            best_box: Optional[Sequence[float]] = None
+            for track in tracks:
+                iou = box_iou(detection.bbox, track.bbox)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_box = track.bbox
+            if (
+                best_box is not None
+                and best_iou >= self._manager.iou_threshold
+                and box_scale_change(detection.bbox, best_box) > limit
+            ):
+                self.size_rejects += 1
+                if not self._warned_size_jump:
+                    LOGGER.info(
+                        "dropping detection with %.2fx size jump at frame %d",
+                        box_scale_change(detection.bbox, best_box),
+                        self.frame_count,
+                    )
+                    self._warned_size_jump = True
+                continue
+            kept.append(detection)
+        return kept
+
     def _dedupe(self, detections: Sequence[Detection]) -> List[Detection]:
-        """在相互重叠的框中只保留置信度最高的一个。
+        """在相互重叠的框中只保留置信度最高的一个（同分时保留更大的整体框）。
 
         阈值即关联阈值：同帧内两个“会被当作同一目标”的框不得都去建 id。
+        置信度相同的整体框与局部框必须让整体框胜出，否则局部框会先建 id、
+        整体框被当重复丢弃。
         """
         threshold = self._manager.iou_threshold
-        ordered = sorted(detections, key=lambda det: det.confidence, reverse=True)
+        ordered = sorted(
+            detections,
+            key=lambda det: (det.confidence, bbox_area(det.bbox)),
+            reverse=True,
+        )
         kept: List[Detection] = []
         for detection in ordered:
             if any(box_iou(detection.bbox, other.bbox) >= threshold for other in kept):

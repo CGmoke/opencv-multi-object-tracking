@@ -32,6 +32,9 @@ tracking:
   # EMA alpha applied when a detection re-anchors an existing id.
   # 1.0 = use the detection box as-is; smaller = steadier box, slightly laggier.
   box_smoothing: 1.0
+  # Track-level sanity check: drop a detection whose width/height differs from the
+  # overlapping track's box by more than this ratio (fragment/local box). 1.0 = off.
+  max_box_change: 1.6
 
 detector:
   # Optional detector hook; "none" disables it (boxes then come from the mouse

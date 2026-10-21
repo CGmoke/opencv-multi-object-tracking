@@ -120,9 +120,22 @@ def describe(box: Sequence[float]) -> str:
     return f"<x={x:.1f} y={y:.1f} w={w:.1f} h={h:.1f}>"
 
 
+def box_scale_change(a: Sequence[float], b: Sequence[float]) -> float:
+    """两个盒的尺寸相对变化倍率，返回 ``>= 1.0``（``1.0`` 表示宽高完全一致）。
+
+    取宽、高两个方向“放大/缩小”倍率的较大值。用于轨迹二次校验：同一 id 的框
+    在一帧内尺寸突变（例如整体框被局部框顶替、或被拆成碎片）时倍率明显大于 1，
+    据此丢弃该检测。
+    """
+    aw, ah = float(a[2]), float(a[3])
+    bw, bh = float(b[2]), float(b[3])
+    return max(aw / bw, bw / aw, ah / bh, bh / ah)
+
+
 __all__ = [
     "EPS",
     "box_iou",
+    "box_scale_change",
     "boxes_to_list",
     "describe",
     "intersection_area",

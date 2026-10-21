@@ -137,6 +137,7 @@ mot-track --dump-config --iou-threshold 0.4 --tracker kcf
 | `--trail-length` | `120` | 每个目标保留的轨迹点上限 |
 | `--max-tracks` | `256` | 同时存活 ID 的硬上限 |
 | `--box-smoothing` | `1.0` | 检测框 EMA 平滑系数（`1`=不平滑，越小越稳但略滞后） |
+| `--max-box-change` | `1.6` | 轨迹二次校验：与已有轨迹重叠但尺寸突变超此倍率的检测被丢弃（`1` 关闭） |
 | `--match-method` | `greedy` | `greedy` 或 `hungarian`（后者需要 scipy） |
 | `--csv` | `outputs/trajectories.csv` | 轨迹输出路径，传 `none` 关闭 |
 | `--append` | 关 | 追加写而不是截断已有 CSV |
@@ -265,6 +266,10 @@ python3 -m mot --source 0 --motion --motion-sensitivity 10 --motion-min-area 400
 因此一个物体只会得到**一个完整框**；有间隙的相邻物体保持各自独立的框与 ID。若目标被
 1~2px 的噪声线切成两块，可用 `--motion-merge-gap 2` 修复。检测框抖动明显时可加
 `--box-smoothing 0.5`（EMA，`1` 表示不平滑）。
+
+**轨迹二次校验**：已建立 ID 的目标若收到与自身框高度重叠、但宽或高突变超过
+`--max-box-change`（默认 `1.6` 倍）的检测，该检测会被丢弃，目标继续由自身跟踪器推进，
+避免局部框/碎片框顶替整体框（`1` 关闭校验）。
 
 **实际尺寸**：给出标定 `pixels_per_meter`（现场用已知尺寸参考物换算）后，每个框的标签
 会显示如 `0.42x0.55m medium`（`small` ≤ 0.5 m，`large` ≥ 2.0 m，阈值可配）；未标定时

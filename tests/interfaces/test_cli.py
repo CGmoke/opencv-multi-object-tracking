@@ -195,6 +195,8 @@ class TestBuildConfig:
                 "0.7",
                 "--box-smoothing",
                 "0.4",
+                "--max-box-change",
+                "2.0",
             ]
         )
         config = build_config(args)
@@ -206,6 +208,7 @@ class TestBuildConfig:
         assert config.motion.nms_iou == 0.5
         assert config.motion.nms_containment == 0.7
         assert config.tracking.box_smoothing == 0.4
+        assert config.tracking.max_box_change == 2.0
 
     def test_config_file_is_overridden_by_cli(self, tmp_path):
         config_file = tmp_path / "config.yaml"

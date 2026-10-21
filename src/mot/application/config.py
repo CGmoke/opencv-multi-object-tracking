@@ -119,6 +119,8 @@ class TrackingConfig:
     max_tracks: int = 256
     #: 框平滑系数（EMA alpha）：``1`` 表示不平滑（直接用检测框），越小框越稳但越滞后。
     box_smoothing: float = 1.0
+    #: 轨迹二次校验：与已有轨迹重叠但尺寸突变超过该倍率的检测被丢弃（1.0 关闭）。
+    max_box_change: float = 1.6
 
     def validate(self) -> None:
         self.backend = _translated(
@@ -142,6 +144,9 @@ class TrackingConfig:
             )
         self.box_smoothing = _as_float(
             self.box_smoothing, "tracking.box_smoothing", 1e-6, 1.0
+        )
+        self.max_box_change = _as_float(
+            self.max_box_change, "tracking.max_box_change", 1.0, 100.0
         )
 
 
