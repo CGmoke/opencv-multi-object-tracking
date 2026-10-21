@@ -74,17 +74,12 @@ def _find(parent: List[int], index: int) -> int:
     return index
 
 
-def _union(parent: List[int], a: int, b: int) -> None:
-    root_a, root_b = _find(parent, a), _find(parent, b)
-    if root_a != root_b:
-        parent[root_b] = root_a
-
-
 def merge_fragments(
     boxes: Iterable[Sequence[float]],
     *,
     iou_threshold: float = 0.15,
     gap_px: float = 0.0,
+    growth: float = 3.0,
 ) -> List[BBox]:
     """把属于同一物体的碎片框合并为外接框。
 
@@ -96,11 +91,20 @@ def merge_fragments(
     轻微重叠（IoU 不足）或边缘紧贴（间隙恰为 0）**不会**合并，以免把并排的
     两个独立目标当成一个。
 
+    **面积护栏**：每次尝试合并两个分组前，先计算两者的并集外接框面积；若它超过
+    ``growth × 两个分组中最大的单个碎片面积``，本次合并被拒绝，两个分组保持独立。
+    护栏作用在 union-find 的每一次合并尝试上（含传递合并的中间步骤），而不是最后
+    对结果做过滤——否则链式膨胀已经发生，再过滤只会把整个目标丢掉。基准取
+    “最大的单个碎片面积”而不是分组的累计面积：后者会让每一跳再放大 ``growth`` 倍，
+    长链依然能吞掉整片背景。
+
     Args:
         boxes: 待合并的框。
         iou_threshold: 触发合并的 IoU 下限（``0`` 表示任意重叠都合并）。
         gap_px: 触发合并的最大边缘间隙（像素）；默认 ``0`` 关闭间隙合并，只按
             IoU 合并；调到 ``2~3`` 可修复被 1~2px 噪声线切开的碎片。
+        growth: 合并后外接框面积相对最大单框面积的上限倍数（默认 ``3.0``）；
+            ``<= 0`` 关闭护栏（退化为无上限的传递合并）。
 
     Returns:
         合并后的框，按 ``(y, x)`` 排序，保证输出顺序稳定。
@@ -109,17 +113,37 @@ def merge_fragments(
     if len(items) <= 1:
         return [item for item in items]  # type: ignore[misc]
 
+    limit = float(growth)
     parent = list(range(len(items)))
+    group_box: dict[int, BBox] = {index: item for index, item in enumerate(items)}
+    group_max_area: dict[int, float] = {
+        index: _box_area(item) for index, item in enumerate(items)
+    }
+
+    def try_union(i: int, j: int) -> None:
+        root_i, root_j = _find(parent, i), _find(parent, j)
+        if root_i == root_j:
+            return
+        merged = union_box(group_box[root_i], group_box[root_j])
+        if limit > 0.0:
+            cap = limit * max(group_max_area[root_i], group_max_area[root_j])
+            if _box_area(merged) > cap:
+                return  # 拒绝链式膨胀：保留两个独立框，不做截断/裁剪
+        parent[root_j] = root_i
+        group_box[root_i] = merged
+        group_max_area[root_i] = max(group_max_area[root_i], group_max_area[root_j])
+
     for i in range(len(items)):
         for j in range(i + 1, len(items)):
             if _should_merge(items[i], items[j], iou_threshold, gap_px):
-                _union(parent, i, j)
+                try_union(i, j)
 
-    groups: dict[int, BBox] = {}
-    for index, item in enumerate(items):
+    roots: List[int] = []
+    for index in range(len(items)):
         root = _find(parent, index)
-        groups[root] = item if root not in groups else union_box(groups[root], item)
-    return sorted(groups.values(), key=lambda box: (box[1], box[0]))
+        if root not in roots:
+            roots.append(root)
+    return sorted((group_box[root] for root in roots), key=lambda box: (box[1], box[0]))
 
 
 def _should_merge(

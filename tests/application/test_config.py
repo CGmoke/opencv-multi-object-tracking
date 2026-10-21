@@ -274,6 +274,88 @@ class TestWebSection:
             AppConfig.from_file(write(tmp_path, "web:\n  threads: 8\n"))
 
 
+class TestOptimizationKeys:
+    """P1 补丁预留键：默认值、部分覆盖与边界校验。"""
+
+    def test_tracking_defaults(self):
+        tracking = AppConfig.defaults().tracking
+        assert tracking.max_coast == 8
+        assert tracking.dedupe_tracks is True
+        assert tracking.merge_track_iou == 0.5
+        assert tracking.merge_track_frames == 5
+        assert tracking.max_parallel == 0
+
+    def test_motion_defaults(self):
+        motion = AppConfig.defaults().motion
+        assert motion.max_fg_ratio == 0.25
+        assert motion.burst_recover_frames == 3
+        assert motion.min_quality == 0.45
+        assert motion.merge_growth == 3.0
+        assert motion.max_drift_px == 0.0
+
+    def test_partial_yaml_overrides_new_keys(self, tmp_path):
+        path = write(
+            tmp_path,
+            "tracking:\n"
+            "  max_coast: 3\n"
+            "  dedupe_tracks: false\n"
+            "  merge_track_iou: 0.7\n"
+            "  merge_track_frames: 2\n"
+            "  max_parallel: 4\n"
+            "motion:\n"
+            "  max_fg_ratio: 0.4\n"
+            "  min_quality: 0.6\n"
+            "  merge_growth: 2.0\n"
+            "  max_drift_px: 50\n",
+        )
+        config = AppConfig.from_file(path)
+        assert config.tracking.max_coast == 3
+        assert config.tracking.dedupe_tracks is False
+        assert config.tracking.merge_track_iou == 0.7
+        assert config.tracking.merge_track_frames == 2
+        assert config.tracking.max_parallel == 4
+        assert config.motion.max_fg_ratio == 0.4
+        assert config.motion.min_quality == 0.6
+        assert config.motion.merge_growth == 2.0
+        assert config.motion.max_drift_px == 50.0
+        # 未出现在 YAML 中的键保持默认值，不做隐式重置。
+        assert config.tracking.max_missing == 15
+        assert config.motion.min_area_px == 200.0
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "  max_coast: -1\n",
+            "  dedupe_tracks: 'yes'\n",
+            "  merge_track_iou: 0\n",
+            "  merge_track_iou: 1.1\n",
+            "  merge_track_frames: 0\n",
+            "  max_parallel: -1\n",
+            "  max_parallel: 257\n",
+        ],
+    )
+    def test_invalid_tracking_values_are_rejected(self, tmp_path, payload):
+        with pytest.raises(ConfigError):
+            AppConfig.from_file(write(tmp_path, f"tracking:\n{payload}"))
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "  max_fg_ratio: 0\n",
+            "  max_fg_ratio: 1.1\n",
+            "  burst_recover_frames: -1\n",
+            "  min_quality: -0.1\n",
+            "  min_quality: 1.1\n",
+            "  merge_growth: 0.5\n",
+            "  merge_growth: 1001\n",
+            "  max_drift_px: -1\n",
+        ],
+    )
+    def test_invalid_motion_values_are_rejected(self, tmp_path, payload):
+        with pytest.raises(ConfigError):
+            AppConfig.from_file(write(tmp_path, f"motion:\n{payload}"))
+
+
 class TestRoundTrip:
     def test_to_dict_contains_every_section(self):
         data = AppConfig.defaults().to_dict()

@@ -22,6 +22,7 @@ from mot.domain.association import MATCH_METHODS
 from mot.domain.errors import ValidationError
 from mot.domain.limits import (
     MAX_FRAMES,
+    MAX_MISSING_LIMIT,
     validate_iou_threshold,
     validate_max_frames,
     validate_max_missing,
@@ -125,6 +126,16 @@ class TrackingConfig:
     smooth_window: int = 5
     #: 轨迹二次校验：与已有轨迹重叠但尺寸突变超过该倍率的检测被丢弃（1.0 关闭）。
     max_box_change: float = 1.6
+    #: 无检测支持的滑行上限（帧）；超过即回收 id。
+    max_coast: int = 8
+    #: 轨迹端去重开关：把持续描述同一物体的重复 id 合并为一个。
+    dedupe_tracks: bool = True
+    #: 判定两条轨迹属于同一物体的 IoU 阈值。
+    merge_track_iou: float = 0.5
+    #: 连续 N 帧满足重叠条件才合并（防抖）。
+    merge_track_frames: int = 5
+    #: 并行推进的跟踪器数量；``0`` 表示串行。
+    max_parallel: int = 0
 
     def validate(self) -> None:
         self.backend = _translated(
@@ -154,6 +165,17 @@ class TrackingConfig:
         )
         self.min_hits = _as_int(self.min_hits, "tracking.min_hits", 1, 100_000)
         self.smooth_window = _as_int(self.smooth_window, "tracking.smooth_window", 0, 999)
+        self.max_coast = _as_int(
+            self.max_coast, "tracking.max_coast", 0, MAX_MISSING_LIMIT
+        )
+        self.dedupe_tracks = _require_bool(self.dedupe_tracks, "tracking.dedupe_tracks")
+        self.merge_track_iou = _as_float(
+            self.merge_track_iou, "tracking.merge_track_iou", 1e-6, 1.0
+        )
+        self.merge_track_frames = _as_int(
+            self.merge_track_frames, "tracking.merge_track_frames", 1, 100_000
+        )
+        self.max_parallel = _as_int(self.max_parallel, "tracking.max_parallel", 0, 256)
 
 
 @dataclass
@@ -309,6 +331,16 @@ class MotionConfig:
     pixels_per_meter: Optional[float] = None
     small_max_m: float = 0.5
     large_min_m: float = 2.0
+    #: 全局前景占比上限：超过视为光照/场景突变，整帧前景被丢弃。
+    max_fg_ratio: float = 0.25
+    #: 全局突变后用于重新适应背景的帧数。
+    burst_recover_frames: int = 3
+    #: 运动候选的质量分下限。
+    min_quality: float = 0.45
+    #: 碎片合并的面积增长上限倍数（``1`` 表示不允许增长）。
+    merge_growth: float = 3.0
+    #: 无检测支持时的累计漂移上限（px）；``0`` 关闭。
+    max_drift_px: float = 0.0
 
     def validate(self) -> None:
         self.enabled = _require_bool(self.enabled, "motion.enabled")
@@ -364,6 +396,15 @@ class MotionConfig:
                 "motion.large_min_m must be greater than motion.small_max_m, "
                 f"got small_max_m={self.small_max_m}, large_min_m={self.large_min_m}"
             )
+        self.max_fg_ratio = _as_float(
+            self.max_fg_ratio, "motion.max_fg_ratio", 1e-6, 1.0
+        )
+        self.burst_recover_frames = _as_int(
+            self.burst_recover_frames, "motion.burst_recover_frames", 0, 100_000
+        )
+        self.min_quality = _as_float(self.min_quality, "motion.min_quality", 0.0, 1.0)
+        self.merge_growth = _as_float(self.merge_growth, "motion.merge_growth", 1.0, 1000.0)
+        self.max_drift_px = _as_float(self.max_drift_px, "motion.max_drift_px", 0.0, 1e9)
 
 
 @dataclass

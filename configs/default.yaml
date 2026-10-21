@@ -41,6 +41,16 @@ tracking:
   # Track-level sanity check: drop a detection whose width/height differs from the
   # overlapping track's box by more than this ratio (fragment/local box). 1.0 = off.
   max_box_change: 1.6
+  # Frames a track may coast without detection support before its id is dropped.
+  max_coast: 8
+  # Track-level dedupe: merge ids that keep describing the same physical object.
+  dedupe_tracks: true
+  # IoU above which two tracks are considered the same object.
+  merge_track_iou: 0.5
+  # Consecutive frames two tracks must satisfy merge_track_iou before merging.
+  merge_track_frames: 5
+  # Trackers updated in parallel; 0 = serial (one tracker at a time).
+  max_parallel: 0
 
 detector:
   # Optional detector hook; "none" disables it (boxes then come from the mouse
@@ -117,6 +127,19 @@ motion:
   pixels_per_meter: null
   small_max_m: 0.5
   large_min_m: 2.0
+  # Reject a whole frame when foreground covers more than this fraction
+  # (lighting change / scene-wide burst).
+  max_fg_ratio: 0.25
+  # Frames used to re-adapt the background at warmup_rate after a burst.
+  burst_recover_frames: 3
+  # Minimum quality score for a motion candidate.
+  min_quality: 0.45
+  # Fragment merge area cap: reject unions larger than this multiple of the
+  # larger input box (1 = no growth allowed).
+  merge_growth: 3.0
+  # Cumulative drift cap in pixels for tracks without detection support;
+  # 0 disables the cap.
+  max_drift_px: 0.0
 
 display:
   enabled: true

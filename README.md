@@ -137,6 +137,8 @@ mot-track --dump-config --iou-threshold 0.4 --tracker kcf
 | `--trail-length` | `120` | 每个目标保留的轨迹点上限 |
 | `--max-tracks` | `256` | 同时存活 ID 的硬上限 |
 | `--box-smoothing` | `1.0` | 检测框 EMA 平滑系数（`1`=不平滑，越小越稳但略滞后） |
+| `--min-hits` | `3` | 轨迹确认所需命中数；未确认轨迹不输出且一次丢失即销毁 |
+| `--smooth-window` | `5` | 包围盒/轨迹滑动平均窗口（`<=1` 关闭，优先于 `--box-smoothing`） |
 | `--max-box-change` | `1.6` | 轨迹二次校验：与已有轨迹重叠但尺寸突变超此倍率的检测被丢弃（`1` 关闭） |
 | `--match-method` | `greedy` | `greedy` 或 `hungarian`（后者需要 scipy） |
 | `--csv` | `outputs/trajectories.csv` | 轨迹输出路径，传 `none` 关闭 |
@@ -278,6 +280,12 @@ python3 -m mot --source 0 --motion --motion-sensitivity 10 --motion-min-area 400
 识别。此时用 IoU 时间连续性判定——相邻检测框 IoU ≥ `static_iou`（默认 `0.95`）连续
 `static_frames`（默认 `30`）次即判定静止：检测端停止输出该候选，跟踪端同时销毁该 ID；
 目标再次移动后重新获得新 ID。`--motion-static-frames 0` 可关闭。
+
+**轨迹生命周期过滤与平滑**：轨迹需累计 `min_hits`（默认 `3`）次命中才被“确认”并进入
+渲染 / CSV / JSONL；未确认的暂定轨迹（通常 1~2 帧的误检）一次丢失就立即销毁，不产生
+移除事件。所有包围盒（跟踪器输出与检测重锚）都会经过 `smooth_window`（默认 `5`）滑动
+平均，轨迹点取平滑后框的中心，因此抖动量明显下降。
+`--smooth-window 1` 关闭滑动平均，此时若 `--box-smoothing < 1` 则退回 EMA 平滑。
 
 **实际尺寸**：给出标定 `pixels_per_meter`（现场用已知尺寸参考物换算）后，每个框的标签
 会显示如 `0.42x0.55m medium`（`small` ≤ 0.5 m，`large` ≥ 2.0 m，阈值可配）；未标定时

@@ -1,0 +1,141 @@
+# ---------------------------------------------------------------------------
+# 室内 640x480 多目标跟踪调优配置（P0：纯参数，不改代码）
+#
+# 这是针对 outputs/web_s2.jsonl 实测诊断的定向调参，不是通用最强配置。
+# 判定依据见 docs/OPTIMIZATION_PLAN.md，诊断数据：
+#   并发 ID 峰值 37 / 空间簇 7  →  ID 膨胀 2.0x
+#   同帧 IoU>0.45 重复对 158 对  /  离谱几何框 15.5%  /  贴边框 10.0%
+#
+# 用法：
+#   mot-web --config configs/indoor-640.yaml                # Web 界面
+#   mot-track --config configs/indoor-640.yaml --source 0   # 本地摄像头
+#   mot-track --config configs/indoor-640.yaml --dump-config  # 先校验能否加载
+#
+# 注意：本文件只使用 default.yaml 里已存在的键。from_file() 对未知键会报错，
+# 所以新增的守护参数（全局突变守护、轨迹去重、coast 上限）必须等 P1 代码补丁
+# 落地后，连同 AppConfig 一起加。
+# ---------------------------------------------------------------------------
+source:
+  source: "0"
+  max_frames: null
+  loop: false
+  seed_boxes: []
+
+tracking:
+  # 【改】csrt -> kcf。实测单目标 update：csrt 17.2ms / kcf 4.5ms（3.8x）。
+  # 37 个目标时 csrt 需 0.64s/帧（1.6 FPS），kcf 需 0.17s/帧（6 FPS）。
+  # kcf 的框更松，配合下面更严的 iou_threshold 与轨迹去重可接受。
+  # 若场景里目标可区分性差（同色衣物互相遮挡），退回去用 csrt 并把 max_tracks 降到 8。
+  backend: kcf
+  # 【改】0.3 -> 0.35。0.3 太松，两个不同目标只要沾边就被判为同一 ID 的延续；
+  # 0.35 配合 640x480 的典型目标尺寸（~40x100）更合理。
+  iou_threshold: 0.35
+  # 【改】15 -> 8。LOST 轨迹每帧仍跑跟踪器且可能被无检测支持的框复活
+  # （#22 漂移 348px 就是这条路径）。8 帧 ≈ 0.25s，足够过短暂遮挡。
+  max_missing: 8
+  trail_length: 60
+  match_method: greedy
+  # 【改】256 -> 24。这是 FPS 地板：即使去重全部失效，24 个 kcf 也只花 0.11s/帧。
+  # 同时防止背景突变一次性 spawn 几十个 ID 把机器拖死。
+  max_tracks: 24
+  box_smoothing: 1.0
+  min_hits: 3
+  # 【改】5 -> 3。5 帧滑动平均在 6 FPS 下 = 0.8s 延迟，拖尾/滞后明显；
+  # 且均值会把「出生即畸形」的框平得更糟。3 帧足够压抖动。
+  smooth_window: 3
+  # 【改】1.6 -> 1.5。紧一点，多拦掉贴边/碎片式的尺寸跳变。
+  max_box_change: 1.5
+
+detector:
+  # 保持 none：本场景（室内、无 GPU、目标为人/手/构件）纯运动检测够用。
+  # 若要根治「识别不精准」，走 P2：backend: yolo + model: weights/yolo11n.pt
+  # + classes: [0] + interval: 3，详见 docs/OPTIMIZATION_PLAN.md 第 6 节。
+  backend: none
+  model: null
+  confidence: 0.35
+  classes: []
+  interval: 1
+
+motion:
+  enabled: true
+  # 【建议试】mog2 -> knn 在纹理密集的室内前景更稳（椅子/窗帘布料纹理会
+  # 在 mog2 下持续渗出前景）。两者都关阴影。先 mog2 跑一轮，噪点仍多再换 knn。
+  method: mog2
+  # 【改】25 -> 32。室内低照度 + 压缩噪点下，25 太敏感；32 牺牲极小灵敏度
+  # 换掉大量细碎前景（实测 p10 面积仅 0.24% 画面，近半数是噪点块）。
+  var_threshold: 32.0
+  dist2_threshold: 625.0
+  # 保持 0.0 冻结背景：运动目标保持完整前景，框更准（代价是不适应光照漂移，
+  # 这由 P1 的全局突变守护兜底）。
+  learning_rate: 0.0
+  # 【改】20 -> 30。室内灯光/自动曝光的收敛比室外慢，预热久一点更干净。
+  warmup_frames: 30
+  warmup_rate: 0.05
+  # 【改】200 -> 1200。200px² 在 640x480 下只占 0.065%（≈14x14），等于「筛子」。
+  # 1200px² ≈ 35x35，仍能留下远处的人（站立人形 ≈ 40x100 = 4000px²）。
+  min_area_px: 1200.0
+  # 【改】8/8 -> 18/18。跟 min_area 一致，双保险拦掉细条与角点伪影。
+  min_width_px: 18
+  min_height_px: 18
+  # 【改】0.6 -> 0.25。0.6 意味着「占画面 60% 才拦」，实测 #43 = 285x383 占
+  # 34.7% 直接放行。#43 的成因是 merge_fragments 链式合并，P0 先靠这条止损。
+  max_area_ratio: 0.25
+  blur_kernel: 5
+  # 【改】0 -> 3。JPEG/摄像头压缩的椒盐噪点主要靠中值滤波，光靠高斯不够。
+  median_kernel: 3
+  # 【改】interval 2 -> 1，temporal_frames 保持 2。
+  # 原配置 2x2 = 掩码跨 4 个原始帧做与运算：手部/快速移动目标被切成碎片，
+  # 一物多 ID。纯运动检测实测约 320 FPS，每帧都跑完全付得起。
+  temporal_frames: 2
+  interval: 1
+  # 【改】0.1/10.0 -> 0.3/3.0。截图里 21x156(#45, 0.13)、14x49(#47, 0.29)、
+  # 35x2(#3, 17.5) 这类细条正是噪点主形状。正常目标 0.3~3.0 覆盖人形与蹲姿。
+  min_aspect: 0.3
+  max_aspect: 3.0
+  # 【改】0.0 -> 0.35。关掉「空心轮廓」：碎片轮廓 + 外接框的填充率通常 <0.3，
+  # 实心目标 >0.6。这条能一次性砍掉大部分「框很大但里面没东西」的假目标。
+  min_fill_ratio: 0.35
+  # 【改】0.15 -> 0.35 且 gap 保持 0。0.15 的 union-find 是传递式的，
+  # 会把「A 碰 B、B 碰 C」串成一个大框（#43 的成因）。0.35 只合并高度重叠的碎片。
+  merge_iou: 0.35
+  merge_gap_px: 0.0
+  # 【改】0.6 -> 0.45 / 0.8 -> 0.6。收紧 NMS，减少「重叠且都保留」的重复框
+  # （实测同帧 IoU>0.45 的重复对共 158 对）。
+  nms_iou: 0.45
+  nms_containment: 0.6
+  # 【改】2 -> 3。多一帧确认，压掉「闪一帧就消失」的短命 ID（实测 12.5%）。
+  # 注意：这只有在 P1 修好 hits 语义后才真正生效（见方案 R4）。
+  min_consecutive: 3
+  # 【改】6 -> 10。6px 位移在 640x480 下的手抖/云台抖动范围内。
+  min_motion_px: 10.0
+  # 【改】30 -> 20。配合 smooth_window=3，静止剔除更快，少留僵尸框。
+  static_iou: 0.95
+  static_frames: 20
+  # 【改】3 -> 5。配合 min_area 1200，开闭运算半径放大一档，连通断裂的碎片。
+  morph_kernel: 5
+  pixels_per_meter: null
+  small_max_m: 0.5
+  large_min_m: 2.0
+
+display:
+  enabled: true
+  show_trails: true
+  show_labels: true
+  show_hud: true
+  trail_fade: true
+  window_name: "OpenCV MOT"
+
+output:
+  csv_path: "outputs/trajectories.csv"
+  video_path: null
+  append: false
+
+web:
+  host: "127.0.0.1"
+  port: 8000
+  max_sessions: 4
+  # 【改】15 -> 10。浏览器端采集本身就受处理链路阻塞；限死在 10 能省下
+  # 主线程的 MJPEG 编码开销，把预算留给 CSRT/KCF 的 update。
+  stream_fps: 10.0
+  upload_dir: null
+  max_upload_bytes: 2000000000

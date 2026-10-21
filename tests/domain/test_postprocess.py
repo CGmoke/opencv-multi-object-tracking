@@ -83,6 +83,26 @@ class TestMergeFragments:
             (100.0, 100.0, 10.0, 10.0),
         ]
 
+    def test_growth_cap_allows_moderate_merge(self):
+        left = (0.0, 0.0, 20.0, 20.0)
+        right = (22.0, 0.0, 20.0, 20.0)  # 2px gap；并集 42x20=840 <= 3x400
+        assert merge_fragments([left, right], gap_px=2, growth=3.0) == [
+            (0.0, 0.0, 42.0, 20.0)
+        ]
+
+    def test_growth_cap_breaks_the_chain(self):
+        boxes = [(0.0, 0.0, 20.0, 20.0), (25.0, 0.0, 20.0, 20.0), (50.0, 0.0, 20.0, 20.0)]
+        # A-B 与 B-C 间隙均为 5px，但三者并集 70x20=1400 > 3x400=1200：
+        # 只允许 A-B 合并，C 必须保持独立，且不得把整组丢掉。
+        assert merge_fragments(boxes, gap_px=5, growth=3.0) == [
+            (0.0, 0.0, 45.0, 20.0),
+            (50.0, 0.0, 20.0, 20.0),
+        ]
+
+    def test_large_growth_falls_back_to_transitive_merge(self):
+        boxes = [(0.0, 0.0, 20.0, 20.0), (25.0, 0.0, 20.0, 20.0), (50.0, 0.0, 20.0, 20.0)]
+        assert merge_fragments(boxes, gap_px=5, growth=1e9) == [(0.0, 0.0, 70.0, 20.0)]
+
 
 class TestNms:
     def test_empty_input(self):

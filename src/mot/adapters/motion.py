@@ -73,6 +73,11 @@ class MotionDetector:
         min_area_px: 最小前景面积（像素）；小于该值视为噪点。
         min_width_px / min_height_px: 包围框最小边长（像素）。
         max_area_ratio: 包围框面积 / 画面面积的上限；超过视为整屏突变。
+        max_fg_ratio: 整帧前景占比上限（默认 ``0.25``）：前景像素数 / 画面像素数超过
+            该值视为全局光照/曝光突变，本帧不产生任何候选，并进入 ``burst_recover_frames``
+            帧的恢复期。``1.0`` 表示关闭该护栏。
+        burst_recover_frames: 全局突变后用于重新适应背景的帧数（默认 ``3``）；
+            恢复期内以 ``warmup_rate`` 更新背景，避免把突变后的亮度当成永久背景。
         blur_kernel: 高斯模糊核边长（奇数，默认 ``5``；``0`` 表示关闭）。在灰度图上
             平滑像素级高频噪声，避免传感器颗粒被背景模型判成前景。
         median_kernel: 中值滤波核边长（奇数，默认 ``0`` 关闭）。对椒盐/压缩噪点比高斯
@@ -88,6 +93,9 @@ class MotionDetector:
         merge_gap_px: 碎片合并的最大边缘间隙（像素）；默认 ``0`` 关闭间隙合并，只合并
             IoU 足够的重叠框；调到 ``2~3`` 可修复被细噪声线切开的碎片，同时仍不会
             合并有正常间隙的相邻物体。
+        merge_growth: 碎片合并的面积上限倍数（默认 ``3.0``）：并集框面积超过
+            ``merge_growth × 最大单框面积`` 时拒绝合并，防止链式合并吞掉整片背景。
+            ``<= 0`` 关闭护栏。
         nms_iou: NMS 的 IoU 阈值，超过该值的重叠框只保留较大的一个。
         nms_containment: 被大框包含的比例阈值；达到该比例的局部框会被抑制。
         min_consecutive: 需要连续命中的帧数（``1`` 表示不要求持续性）。
@@ -123,6 +131,8 @@ class MotionDetector:
         min_width_px: int = 8,
         min_height_px: int = 8,
         max_area_ratio: float = 0.6,
+        max_fg_ratio: float = 0.25,
+        burst_recover_frames: int = 3,
         blur_kernel: int = 5,
         median_kernel: int = 0,
         temporal_frames: int = 2,
@@ -131,6 +141,7 @@ class MotionDetector:
         min_fill_ratio: float = 0.0,
         merge_iou: float = 0.15,
         merge_gap_px: float = 0.0,
+        merge_growth: float = 3.0,
         nms_iou: float = 0.6,
         nms_containment: float = 0.8,
         min_consecutive: int = 2,
@@ -160,6 +171,10 @@ class MotionDetector:
             raise ValueError(f"min box sides must be >= 1, got {min_width_px}x{min_height_px}")
         if not 0.0 < float(max_area_ratio) <= 1.0:
             raise ValueError(f"max_area_ratio must be within (0, 1], got {max_area_ratio}")
+        if not 0.0 < float(max_fg_ratio) <= 1.0:
+            raise ValueError(f"max_fg_ratio must be within (0, 1], got {max_fg_ratio}")
+        if int(burst_recover_frames) < 0:
+            raise ValueError(f"burst_recover_frames must be >= 0, got {burst_recover_frames}")
         for name, value in (("blur_kernel", blur_kernel), ("median_kernel", median_kernel)):
             if int(value) < 0 or (int(value) != 0 and int(value) % 2 == 0):
                 raise ValueError(f"{name} must be 0 or a positive odd number, got {value}")
@@ -175,6 +190,8 @@ class MotionDetector:
             raise ValueError(f"merge_iou must be within [0, 1], got {merge_iou}")
         if float(merge_gap_px) < 0:
             raise ValueError(f"merge_gap_px must be >= 0, got {merge_gap_px}")
+        if float(merge_growth) < 0:
+            raise ValueError(f"merge_growth must be >= 0, got {merge_growth}")
         if not 0.0 <= float(nms_iou) <= 1.0:
             raise ValueError(f"nms_iou must be within [0, 1], got {nms_iou}")
         if not 0.0 < float(nms_containment) <= 1.0:
@@ -196,6 +213,8 @@ class MotionDetector:
         self.min_width_px = int(min_width_px)
         self.min_height_px = int(min_height_px)
         self.max_area_ratio = float(max_area_ratio)
+        self.max_fg_ratio = float(max_fg_ratio)
+        self.burst_recover_frames = int(burst_recover_frames)
         self.blur_kernel = int(blur_kernel)
         self.median_kernel = int(median_kernel)
         self.temporal_frames = int(temporal_frames)
@@ -204,6 +223,7 @@ class MotionDetector:
         self.min_fill_ratio = float(min_fill_ratio)
         self.merge_iou = float(merge_iou)
         self.merge_gap_px = float(merge_gap_px)
+        self.merge_growth = float(merge_growth)
         self.nms_iou = float(nms_iou)
         self.nms_containment = float(nms_containment)
         self.min_consecutive = int(min_consecutive)
@@ -222,6 +242,7 @@ class MotionDetector:
         self._warmup_frames = int(warmup_frames)
         self._warmup_rate = float(warmup_rate)
         self._frame_count = 0
+        self._burst_left = 0
         self._size: Optional[Tuple[int, int]] = None  # (width, height)
         self._candidates: List[_Candidate] = []
         self._masks: Deque[np.ndarray] = deque(maxlen=self.temporal_frames)
@@ -261,8 +282,13 @@ class MotionDetector:
         self._frame_count += 1
         warming = bool(self._warmup_frames) and self._frame_count <= self._warmup_frames
         # 预热期用温和学习率建立初始背景，且不输出检测；预热后按 learning_rate 更新
-        # （默认冻结），使运动物体整体保持为前景。
-        rate = self._warmup_rate if warming else self._learning_rate
+        # （默认冻结），使运动物体整体保持为前景。全局突变后的恢复期同样用
+        # warmup_rate 重新适应背景，避免把突变亮度学成永久背景。
+        if self._burst_left > 0:
+            rate = self._warmup_rate
+            self._burst_left -= 1
+        else:
+            rate = self._warmup_rate if warming else self._learning_rate
         # 先压噪再进背景模型：灰度化 → 高斯（→ 中值）。预热期也用同样的预处理，
         # 保证背景与检测阶段的输入分布一致。
         prepared = self._prepare(frame)
@@ -275,6 +301,12 @@ class MotionDetector:
 
         mask = self._stabilize(mask)
         mask = self._clean_mask(mask)
+        fg_ratio = float(cv2.countNonZero(mask)) / float(max(1, width * height))
+        if fg_ratio > self.max_fg_ratio:
+            # 全局光照/曝光突变：整帧掩码不可信，丢弃本帧并进入背景恢复期，
+            # 避免大面积背景连续多帧被判成前景而批量 spawn 新 id。
+            self._burst_left = self.burst_recover_frames
+            return []
         candidates = self._find_candidates(mask, width, height)
         matched = self._apply_persistence(candidates)
 
@@ -294,6 +326,7 @@ class MotionDetector:
         """清空候选与时序窗口；``keep_background=False`` 时同时重建背景模型。"""
         self._candidates.clear()
         self._masks.clear()
+        self._burst_left = 0
         if not keep_background:
             self._background = self._make_background()
             self._frame_count = 0
@@ -379,6 +412,7 @@ class MotionDetector:
             (box for box, _area in raw),
             iou_threshold=self.merge_iou,
             gap_px=self.merge_gap_px,
+            growth=self.merge_growth,
         )
         kept = nms(
             merged,

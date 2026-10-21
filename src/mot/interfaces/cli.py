@@ -147,6 +147,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="moving-average window for boxes and trails (<=1 = off, default 5)",
     )
     parser.add_argument(
+        "--max-coast",
+        dest="max_coast",
+        type=int,
+        default=None,
+        help="frames a track may coast without detection support before it is dropped",
+    )
+    parser.add_argument(
+        "--dedupe-tracks",
+        dest="dedupe_tracks",
+        action="store_true",
+        default=None,
+        help="merge ids that keep describing the same object (track-level dedupe)",
+    )
+    parser.add_argument(
+        "--no-dedupe-tracks",
+        dest="dedupe_tracks",
+        action="store_false",
+        default=None,
+        help="disable track-level dedupe and keep every id separate",
+    )
+    parser.add_argument(
+        "--merge-track-iou",
+        dest="merge_track_iou",
+        type=float,
+        default=None,
+        help="IoU above which two tracks are considered the same object",
+    )
+    parser.add_argument(
+        "--merge-track-frames",
+        dest="merge_track_frames",
+        type=int,
+        default=None,
+        help="consecutive frames two tracks must overlap before merging",
+    )
+    parser.add_argument(
+        "--max-parallel",
+        dest="max_parallel",
+        type=int,
+        default=None,
+        help="number of trackers updated in parallel (0 = serial)",
+    )
+    parser.add_argument(
         "--match-method",
         choices=list(MATCH_METHODS),
         default=None,
@@ -406,6 +448,16 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.tracking.min_hits = args.min_hits
     if getattr(args, "smooth_window", None) is not None:
         config.tracking.smooth_window = args.smooth_window
+    if getattr(args, "max_coast", None) is not None:
+        config.tracking.max_coast = args.max_coast
+    if getattr(args, "dedupe_tracks", None) is not None:
+        config.tracking.dedupe_tracks = args.dedupe_tracks
+    if getattr(args, "merge_track_iou", None) is not None:
+        config.tracking.merge_track_iou = args.merge_track_iou
+    if getattr(args, "merge_track_frames", None) is not None:
+        config.tracking.merge_track_frames = args.merge_track_frames
+    if getattr(args, "max_parallel", None) is not None:
+        config.tracking.max_parallel = args.max_parallel
     if args.detector is not None:
         config.detector.backend = args.detector
     if args.detector_model is not None:
@@ -531,6 +583,8 @@ def _build_motion(config: AppConfig) -> Optional[Any]:
         min_width_px=config.motion.min_width_px,
         min_height_px=config.motion.min_height_px,
         max_area_ratio=config.motion.max_area_ratio,
+        max_fg_ratio=config.motion.max_fg_ratio,
+        burst_recover_frames=config.motion.burst_recover_frames,
         blur_kernel=config.motion.blur_kernel,
         median_kernel=config.motion.median_kernel,
         temporal_frames=config.motion.temporal_frames,
@@ -539,6 +593,7 @@ def _build_motion(config: AppConfig) -> Optional[Any]:
         min_fill_ratio=config.motion.min_fill_ratio,
         merge_iou=config.motion.merge_iou,
         merge_gap_px=config.motion.merge_gap_px,
+        merge_growth=config.motion.merge_growth,
         nms_iou=config.motion.nms_iou,
         nms_containment=config.motion.nms_containment,
         min_consecutive=config.motion.min_consecutive,

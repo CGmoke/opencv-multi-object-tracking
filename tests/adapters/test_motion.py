@@ -131,6 +131,34 @@ def test_full_frame_change_is_ignored():
     assert detector(bright, 0.0) == []
 
 
+def test_global_brightness_burst_is_dropped():
+    """整幅变亮：前景占比超过 max_fg_ratio → 本帧无候选，并进入恢复期。"""
+    detector = MotionDetector(warmup_frames=20, temporal_frames=1, min_consecutive=1)
+    warm_up(detector)
+    bright = np.full((HEIGHT, WIDTH, 3), 255, dtype=np.uint8)
+    assert detector(bright, 0.0) == []
+    assert detector._burst_left == 3
+
+
+def test_burst_recovery_restores_detection():
+    """恢复期内 _burst_left 逐帧衰减到 0，之后正常目标重新可检出。"""
+    detector = MotionDetector(warmup_frames=20, temporal_frames=1, min_consecutive=1)
+    warm_up(detector)
+    assert detector(np.full((HEIGHT, WIDTH, 3), 255, dtype=np.uint8), 0.0) == []
+    for expected in (2, 1, 0):
+        assert detector(blank(), 0.0) == []
+        assert detector._burst_left == expected
+    assert feed_moving(detector), "recovery 完成后应恢复正常输出"
+
+
+def test_small_moving_target_is_not_treated_as_burst():
+    """正常小目标帧的前景占比远低于阈值，不得触发突变护栏。"""
+    detector = MotionDetector(warmup_frames=20, temporal_frames=1, min_consecutive=1)
+    warm_up(detector)
+    assert feed_moving(detector)
+    assert detector._burst_left == 0
+
+
 def test_multiple_moving_objects_get_separate_boxes():
     detector = MotionDetector(warmup_frames=20, min_consecutive=2)
     warm_up(detector)
@@ -385,6 +413,9 @@ def test_zero_static_frames_disables_the_check():
         {"min_area_px": -1},
         {"min_width_px": 0},
         {"max_area_ratio": 0.0},
+        {"max_fg_ratio": 0.0},
+        {"max_fg_ratio": 1.1},
+        {"burst_recover_frames": -1},
         {"blur_kernel": -1},
         {"blur_kernel": 4},
         {"median_kernel": 2},
