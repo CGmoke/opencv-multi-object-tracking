@@ -5,9 +5,9 @@
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 [![OpenCV](https://img.shields.io/badge/opencv-4.5.1%2B-green.svg)](pyproject.toml)
 
-一个**纯 OpenCV** 的多目标跟踪框架：为每个目标各持有一个 CSRT / KCF 跟踪器，用 IoU 做帧间关联来维持唯一 ID，目标丢失超过容忍帧数即销毁 ID，新目标自动分配新 ID，并绘制包围框、ID 与运动轨迹，轨迹点可导出 CSV。
+一个**纯 OpenCV** 的多目标跟踪框架：为每个目标各持有一个 CSRT / KCF 跟踪器，用 IoU 做帧间关联来维持唯一 ID，目标丢失超过容忍帧数即销毁 ID，新目标自动分配新 ID，并绘制包围框、ID 与运动轨迹，轨迹点可导出 CSV。目标来源支持三种方式：手工种子框 / 运行时框选、内置 MOG2/KNN 运动检测（无需模型权重）、可选 YOLO 检测器。
 
-仓库定位是**教学与二次开发骨架**：依赖少、分层清楚、核心逻辑可脱离 OpenCV 单测。它不是生产级 MOT 系统（没有 ReID、卡尔曼滤波，也没有内置检测器驱动）。
+仓库定位是**教学与二次开发骨架**：依赖少、分层清楚（domain → application → adapters → interfaces 端口-适配器架构），核心逻辑可脱离 OpenCV 单测。它不是生产级 MOT 系统（没有 ReID 与卡尔曼滤波）。
 
 > 状态：`v0.2.0`（alpha）。仓库框架、参考实现与测试已就位；真实摄像头、GUI 交互与扩展方向见 [已知限制](#已知限制)。
 
@@ -43,36 +43,57 @@
 | ID 生命周期 | 目标丢失后保留 ID `max_missing` 帧等待恢复；超时销毁；无主检测自动分配新 ID |
 | 轨迹绘制与导出 | 绘制包围框、ID、带衰减的历史轨迹；轨迹点写入 CSV（含中心点、时间戳、标签） |
 | 多种跟踪后端 | `csrt`（默认，精度优先）、`kcf`（速度优先）、`mil`、`mosse` |
+| 轨迹生命周期过滤 | `min_hits` 确认制挡掉 1~2 帧误检；`max_coast` 限制无检测支持的滑行时长，防漂移僵尸轨迹 |
+| 轨迹去重 | 长期描述同一物理目标的多条轨迹按 IoU + 连续帧数条件自动合并，仅保留更早、更可信的轨迹 |
+| 并行跟踪 | `--max-parallel` 用线程池并行执行跟踪器 update 纯计算阶段（默认串行，保证结果可复现） |
+| 运动检测守护 | 光照突变整帧丢弃 + 背景快速重学、复合置信度评分、碎片合并面积护栏，防 ID 爆发与巨型框 |
+| YOLO 检测（可选） | `--detector yolo` 接入 ultralytics 权重，类别过滤 / 置信度 / 检测间隔可配 |
+| Web 帧率监控 | 捕获 / 处理 / 推流三路滑动窗口速率统计，处理积压时自动跳帧避免阻塞 |
 | 无显示运行 | `--no-display` 用于服务器 / CI / 批量处理 |
 | 录像 | `--record out.mp4` 保存带标注的视频 |
 | 安全默认值 | 拒绝符号链接写入、CSV 公式注入转义、配置项严格类型与上界校验、`--append` 显式追加 |
 
 ## 目录结构
 
+代码按严格的四层端口-适配器架构组织，依赖方向单向（外层依赖内层，反向禁止）：
+
 ```text
 .
 ├── configs/
-│   └── default.yaml            # 完整配置示例（含注释）
+│   ├── default.yaml            # 完整配置示例（含注释）
+│   ├── indoor-640.yaml         # 640x480 固定机位室内场景预设
+│   └── upload-720.yaml         # 720x1280 竖屏手持上传视频场景预设
 ├── src/mot/
-│   ├── __init__.py             # 公开 API
-│   ├── __main__.py             # python -m mot 入口
-│   ├── app.py                  # CLI、主循环、OpenCV 窗口与渲染编排
-│   ├── config.py               # YAML 配置加载与严格校验
-│   ├── interactive.py          # 交互状态机（不依赖 cv2，可无头测试）
-│   ├── iou.py                  # IoU / 重叠矩阵
-│   ├── matching.py             # 贪心与匈牙利关联
-│   ├── models.py               # BBox、Detection、TrackedObject、IdAllocator
-│   ├── pipeline.py             # 检测 → 去重 → 跟踪 的单帧管道
-│   ├── track_manager.py        # ID 生命周期核心（不导入 cv2）
-│   ├── trackers.py             # OpenCV 跟踪器后端的兼容封装
-│   ├── trajectory.py           # CSV 导出（原子写、注入防护）
-│   ├── utils.py                # FPS 计、日志、文件名清洗
-│   ├── video_source.py         # 摄像头/文件输入、录像输出
-│   ├── visualization.py        # 绘制函数
-│   └── detectors/
-│       ├── __init__.py
-│       └── yolo.py             # 可选 YOLO 检测器适配器（实验性，未接入 CLI）
+│   ├── __init__.py             # 公开 API（惰性加载，无 OpenCV 也可导入核心）
+│   ├── __main__.py             # python3 -m mot 入口
+│   ├── domain/                 # 纯领域层：零 OpenCV / I/O 依赖
+│   │   ├── models.py           #   BBox、Detection、TrackedObject、IdAllocator
+│   │   ├── lifecycle.py        #   ID 生命周期状态机（tentative/active/lost）
+│   │   ├── association.py      #   IoU 重叠矩阵、贪心与匈牙利关联
+│   │   ├── postprocess.py      #   检测后处理：碎片合并、NMS、置信度复合评分
+│   │   ├── sizing.py           #   像素 → 实际尺寸换算（纯函数）
+│   │   ├── limits.py           #   全部数值阈值与边界校验（单一真源）
+│   │   ├── errors.py           #   ValidationError 等领域错误
+│   │   └── ports.py            #   Tracker/Detector 等端口契约
+│   ├── application/            # 用例编排层：不依赖 cv2 / argparse
+│   │   ├── pipeline.py         #   检测 → 后处理 → 去重 → 跟踪 的单帧管道
+│   │   ├── session.py          #   会话主循环（种子框、手工框、事件分发）
+│   │   └── config.py           #   YAML 配置加载与严格校验
+│   ├── adapters/               # 适配层：唯一允许导入 OpenCV 的层级
+│   │   ├── trackers.py         #   CSRT/KCF/MIL/MOSSE 兼容封装（新旧 API 回退）
+│   │   ├── motion.py           #   MOG2/KNN 背景建模 + 预处理 + 守护逻辑
+│   │   ├── detectors/          #   检测器适配（base.py 假检测器、yolo.py 可选 YOLO）
+│   │   ├── sources.py          #   摄像头 / 文件 / RTSP 输入
+│   │   ├── queue_source.py     #   Web 上传与浏览器摄像头的队列帧源
+│   │   ├── sinks/              #   轨迹 CSV / 事件 JSONL / 录像输出
+│   │   └── rendering.py        #   包围框、ID、轨迹绘制
+│   ├── interfaces/             # 入口层：组合根与用户界面
+│   │   ├── cli.py              #   CLI 参数解析与适配器装配（唯一组合根）
+│   │   ├── ui_window.py        #   OpenCV 窗口与鼠标 / 键盘交互
+│   │   └── web.py              #   Flask Web 监测界面（会话注册表、MJPEG 推流）
+│   └── utils/                  # FPS 计（含 FrameBudget）、日志、路径工具
 ├── tests/                      # pytest 用例（核心逻辑无需 OpenCV）
+├── docs/                       # 架构设计 / 优化计划 / 路线图
 ├── .github/                    # CI、Issue/PR 模板
 ├── pyproject.toml
 ├── requirements.txt
@@ -89,7 +110,7 @@
 git clone https://github.com/CGmoke/opencv-multi-object-tracking.git
 cd opencv-multi-object-tracking
 
-python -m venv <venv-dir>
+python3 -m venv <venv-dir>
 source <venv-dir>/bin/activate   # Windows: <venv-dir>\Scripts\activate
 pip install -e ".[dev]"          # 或：pip install -r requirements-dev.txt
 ```
@@ -140,7 +161,16 @@ mot-track --dump-config --iou-threshold 0.4 --tracker kcf
 | `--min-hits` | `3` | 轨迹确认所需命中数；未确认轨迹不输出且一次丢失即销毁 |
 | `--smooth-window` | `5` | 包围盒/轨迹滑动平均窗口（`<=1` 关闭，优先于 `--box-smoothing`） |
 | `--max-box-change` | `1.6` | 轨迹二次校验：与已有轨迹重叠但尺寸突变超此倍率的检测被丢弃（`1` 关闭） |
+| `--max-coast` | `8` | 无检测支持（滑行）连续超过该帧数即销毁 ID，防跟踪器自滑行产生漂移轨迹 |
+| `--dedupe-tracks` / `--no-dedupe-tracks` | 开 | 轨迹级去重：长期描述同一物体（连续多帧同时满足 IoU、面积比、中心距离条件）的轨迹合并，保留更早的一条 |
+| `--merge-track-iou` | `0.5` | 两条轨迹判定为同一物体的 IoU 下限（配合 `--merge-track-frames`） |
+| `--merge-track-frames` | `5` | 连续满足合并条件的帧数下限 |
+| `--max-parallel` | `0` | 线程池并行执行的跟踪器 update 数量（`0` 串行；仅并行纯计算阶段，关联与状态机仍在主线程，保证可复现） |
 | `--match-method` | `greedy` | `greedy` 或 `hungarian`（后者需要 scipy） |
+| `--detector` | `none` | 检测后端：`none`（种子框 / 框选 / 运动检测）或 `yolo`（需 `pip install ultralytics`；与 `--motion` 同开时检测器优先） |
+| `--detector-model` | 无 | YOLO 本地权重路径（不自动下载，见 [SECURITY.md](SECURITY.md)） |
+| `--detector-interval` | `1` | 每 N 帧运行一次检测器（首帧总是检测，间隙由跟踪器推进） |
+| `--detector-conf` | `0.35` | 检测置信度阈值 |
 | `--csv` | `outputs/trajectories.csv` | 轨迹输出路径，传 `none` 关闭 |
 | `--append` | 关 | 追加写而不是截断已有 CSV |
 | `--record` | 无 | 保存带标注视频的路径 |
@@ -205,6 +235,12 @@ mot-web                          # 或：python3 -m mot --web
 
 **放大查看**：单击卡片画面即全屏放大（单击、`Esc` 或右上角 `×` 退出，回到原卡片布局）；
 按住拖拽仍是框选目标，两者按是否发生拖动区分。
+
+**帧率监控**：每路会话用滑动窗口分别统计**捕获 / 处理 / 推流**三路速率（`capture_fps` /
+`process_fps` / `stream_fps`）与跳帧数（`stream_skipped`、`dropped`），随会话状态接口一并
+返回。当处理速度跟不上输入时会自动跳帧，只处理最新帧，避免积压阻塞 pipeline；若发现
+`process_fps` 明显低于 `capture_fps`，优先换 `--tracker kcf`、增大 `--motion-interval` 或
+降低 `stream_fps`。
 
 > 没有检测器时，请用**种子框**或在实时画面上**拖拽框选**目标（下一帧生效）——否则画面里不会产生任何目标。
 
@@ -287,6 +323,20 @@ python3 -m mot --source 0 --motion --motion-sensitivity 10 --motion-min-area 400
 平均，轨迹点取平滑后框的中心，因此抖动量明显下降。
 `--smooth-window 1` 关闭滑动平均，此时若 `--box-smoothing < 1` 则退回 EMA 平滑。
 
+**稳健性守护**（配置项，位于 `motion:` 段）：针对自动检测常见的三类失控设有护栏——
+
+| 守护 | 配置项 | 机制 |
+| --- | --- | --- |
+| 光照突变 ID 爆发 | `max_fg_ratio` / `burst_recover_frames` | 前景占比超过阈值（默认 `0.25`）时判定为全局突变，丢弃本帧全部候选，并以 `warmup_rate` 快速重学背景 `burst_recover_frames` 帧 |
+| 置信度饱和 | `min_quality` | 候选置信度采用面积、填充率、长宽比等复合评分（不随面积单调递增），低于 `min_quality`（默认 `0.45`）的候选不进入管道 |
+| 巨型合并框 | `merge_growth` | 每次碎片合并前校验并集面积不超过较大输入框的 `merge_growth` 倍（默认 `3.0`），防止链式合并出覆盖半屏的巨型框 |
+
+此外 `max_drift_px`（默认 `0` 关闭）可限制无检测支持轨迹的累计漂移距离；`learning_rate`
+设为小正值（如 `0.01`）可让背景缓慢吸收“移动过的静态区域”，手持拍摄场景能显著减少
+ghost 残留（冻结背景 `0.0` 则保持框完整覆盖物体）。典型场景可直接用预设：
+[`configs/indoor-640.yaml`](configs/indoor-640.yaml)（固定机位）与
+[`configs/upload-720.yaml`](configs/upload-720.yaml)（竖屏手持上传视频）。
+
 **实际尺寸**：给出标定 `pixels_per_meter`（现场用已知尺寸参考物换算）后，每个框的标签
 会显示如 `0.42x0.55m medium`（`small` ≤ 0.5 m，`large` ≥ 2.0 m，阈值可配）；未标定时
 显示像素尺寸 `50x60px`。尺寸换算为纯函数 `mot.domain.sizing`，可独立复用。
@@ -322,7 +372,9 @@ python3 -m mot --source 0 --motion --motion-sensitivity 10 --motion-min-area 400
 
 ## 配置文件
 
-完整示例见 [`configs/default.yaml`](configs/default.yaml)：
+完整示例见 [`configs/default.yaml`](configs/default.yaml)，另有
+[`indoor-640.yaml`](configs/indoor-640.yaml)（固定机位室内）与
+[`upload-720.yaml`](configs/upload-720.yaml)（竖屏手持上传视频）两个场景预设：
 
 ```yaml
 source:
@@ -338,6 +390,31 @@ tracking:
   trail_length: 120
   match_method: greedy
   max_tracks: 256
+  min_hits: 3          # 轨迹确认所需命中数
+  smooth_window: 5     # 包围盒/轨迹滑动平均（<=1 关闭）
+  max_box_change: 1.6  # 尺寸突变二次校验（1 关闭）
+  max_coast: 8         # 无检测支持滑行上限
+  dedupe_tracks: true  # 轨迹级去重开关
+  merge_track_iou: 0.5      # 去重：同物体 IoU 下限
+  merge_track_frames: 5     # 去重：需连续满足的帧数
+  max_parallel: 0      # 并行跟踪器数（0 串行）
+
+detector:
+  backend: none        # none 或 yolo（需 pip install ultralytics）
+  model: null          # 本地权重路径，不自动下载
+  confidence: 0.35
+  classes: []          # 空 = 全部类别
+  interval: 1          # 每 N 帧检测一次
+
+motion:
+  enabled: false       # --motion 等价
+  method: mog2         # mog2 / knn
+  var_threshold: 25.0
+  learning_rate: 0.0   # 0 冻结背景；手持场景建议 0.01
+  merge_iou: 0.15      # 碎片合并
+  merge_growth: 3.0    # 合并面积护栏（并集 <= 较大框 x 此倍数）
+  max_fg_ratio: 0.25   # 光照突变守护：前景占比上限
+  min_quality: 0.45    # 复合置信度下限
 
 display:
   enabled: true
@@ -351,6 +428,14 @@ output:
   csv_path: outputs/trajectories.csv
   video_path: null
   append: false
+
+web:
+  host: "127.0.0.1"
+  port: 8000
+  max_sessions: 4
+  stream_fps: 15.0
+  upload_dir: null
+  max_upload_bytes: 2000000000
 ```
 
 校验是严格的：未知字段、类型不符、越界（如 `iou_threshold > 1`、`max_missing < 0`）都会以退出码 `2` 报错，而不是静默截断。CLI 参数优先于配置文件。
@@ -380,24 +465,26 @@ track_id,frame,timestamp,x,y,w,h,cx,cy,label
 
 ```text
             ┌────────────┐   frame    ┌──────────────┐  detections ┌──────────────────┐
- video/ ───►│ VideoSource├───────────►│  MOTPipeline ├────────────►│  TrackManager    │
- camera     └────────────┘            │  (可选 detector)            │  IoU 关联 + ID   │
-                                      └──────┬───────┘             │  生命周期 + trail │
-                                             │  FrameResult         └───────┬──────────┘
-                                             ▼                             │ tracker 工厂注入
-                                    ┌────────────────┐                     ▼
-                                    │  app.py 主循环  │            OpenCV CSRT/KCF/...
-                                    │  绘制 / 交互 /  │
-                                    │  CSV / 录像     │
-                                    └────────────────┘
+ video/ ───►│  adapters  ├───────────►│ application  ├────────────►│  domain          │
+ camera     │  sources   │            │  MOTPipeline │  (后处理)    │  关联 + ID 生命周期│
+ web        └────────────┘            │  (可选检测器) │             │  轨迹去重 + trail │
+                                      └──────┬───────┘             └───────┬──────────┘
+                                             │  FrameResult                │ Tracker 端口
+                                             ▼                             ▼
+                                    ┌────────────────┐            ┌──────────────────┐
+                                    │  session.py    │◄───────────│ adapters         │
+                                    │  主循环 / 事件  │   端口注入  │ CSRT/KCF、MOG2、 │
+                                    │  CSV / 录像    │            │ YOLO、渲染、录像  │
+                                    └────────────────┘            └──────────────────┘
 ```
 
 关键设计：
 
-- **核心层不依赖 OpenCV**：`models` / `iou` / `matching` / `track_manager` / `pipeline` / `trajectory` 都可以在无 cv2 的环境导入，跟踪器通过零参工厂注入，因此可用假跟踪器完整单测 ID 生命周期。
-- **单帧管道是纯函数式的**：`MOTPipeline.step(frame)` 返回 `FrameResult`（目标、新建、销毁、匹配、检测），便于替换 UI。
-- **ID 语义**：ID 单调自增、会话内不复用；目标丢失后保留 `max_missing` 帧供 IoU 恢复；同一位置的新目标拿到新 ID。
-- **同帧去重**：手工框与检测框使用同一个 IoU 阈值合并，避免“一物两 ID”。
+- **四层端口-适配器架构**：`domain → application → adapters → interfaces` 依赖方向单向；领域层零 OpenCV / I/O 依赖，跟踪器与检测器通过端口（`domain/ports.py`）注入，由 adapters 层提供实现，因此可用假跟踪器完整单测 ID 生命周期。架构守卫测试强制执行依赖方向约束。
+- **单帧管道是纯函数式的**：`MOTPipeline.step(frame, timestamp)` 返回 `FrameResult`（目标、新建、销毁、匹配、检测），便于替换 UI。
+- **ID 语义**：ID 单调自增、会话内不复用；目标丢失后保留 `max_missing` 帧供 IoU 恢复，连续无检测支持超过 `max_coast` 帧即销毁；同一位置的新目标拿到新 ID。
+- **同帧去重 + 轨迹去重**：手工框与检测框同帧按 IoU 合并，避免“一物两 ID”；跨帧长期重叠的重复轨迹由轨迹级去重合并。
+- **可复现优先**：`--max-parallel` 只并行跟踪器 update 的纯计算阶段，关联与状态机始终在主线程按固定顺序执行；默认串行。
 
 细节（状态机、匹配算法、设计取舍、性能热点）见源码与 `tests/` 下的对应用例。
 
@@ -408,9 +495,10 @@ make test      # python -m pytest
 make lint      # ruff check src tests
 ```
 
-- 核心逻辑（IoU、匹配、ID 生命周期、管道、CSV、配置）用假跟踪器测试，不需要 OpenCV。
+- 核心逻辑（IoU、匹配、ID 生命周期、管道、后处理、CSV、配置）用假跟踪器测试，不需要 OpenCV。
 - 依赖 cv2 的用例在模块级 `pytest.importorskip("cv2")`，无 OpenCV 环境自动跳过。
-- 当前：**279 个用例**，覆盖 CLI 端到端（合成视频 → 跟踪 → CSV / 录像 / 错误路径）。
+- 架构守卫测试（`tests/test_architecture.py`）强制执行四层依赖方向约束。
+- 当前：**609 个用例**，覆盖 CLI 端到端（合成视频 → 跟踪 → CSV / 录像 / 错误路径）与 Web 会话。
 
 CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 Ubuntu 上跑 Python 3.9 / 3.11 / 3.12 矩阵：ruff 静态检查、pytest、`python -m build` + `twine check` 打包校验。
 
@@ -423,14 +511,15 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 Ubuntu 上跑 
 | NumPy | 1.26.4 | >= 1.21 |
 | 平台 | Linux（无显示器，`--no-display`） | 跨平台，macOS/Windows 未实测 |
 
-跟踪器构造按 `cv2.TrackerX_create` → `cv2.legacy.TrackerX_create` → `cv2.TrackerX.create()` 的顺序回退，以兼容新旧 OpenCV 的 API 变动。GUI、真实摄像头与高版本 OpenCV 尚未在 CI 中验证。
+跟踪器构造按 `cv2.legacy.TrackerX_create` → `cv2.TrackerX_create` → `cv2.TrackerX.create()` 的顺序探测（**legacy 优先**）：OpenCV 5.0.0 的新实现 `cv2.TrackerX_create` 在“运动检测 + 大量实例创建/销毁”负载下存在堆损坏缺陷，`cv2.legacy` 版本稳定；旧构建没有 `cv2.legacy` 时自动回退到新实现。GUI、真实摄像头与高版本 OpenCV 尚未在 CI 中验证。
 
 ## 扩展方向
 
-- **结合 YOLO 做检测 + 跟踪**：`MOTPipeline` 已支持注入 `detector`（`frame -> Sequence[Detection]`），`mot.detectors.YoloDetector` 提供适配器，但**尚未接入 config / CLI**——目前需要在 Python 里显式构造，属于实验性代码，没有自动化测试。
+- **结合 YOLO 做检测 + 跟踪**：`--detector yolo --detector-model yolo11n.pt --detector-conf 0.35 --detector-interval 3` 即可让检测驱动跟踪（需 `pip install ultralytics`；类别过滤暂经配置文件的 `detector.classes` 列表设置）。权重不随仓库分发、不自动下载，加载不可信 `.pt` 权重存在代码执行风险，见 [SECURITY.md](SECURITY.md)。
+- **换检测器**：实现检测器端口 `(frame, timestamp) -> Sequence[Detection]`（见 `mot.domain.ports.Detector` 与 `adapters/detectors/base.py` 的假检测器）即可注入；`adapters/detectors/yolo.py` 是参考实现。
 - **换匹配算法**：`--match-method hungarian` 改用全局最优匹配（需要 `pip install scipy`；缺失时自动回退 greedy 并告警）。
-- **替换跟踪器**：实现 `init(frame, bbox) -> bool` / `update(frame) -> (bool, bbox)` 的对象即可通过 `TrackManager(tracker_factory=...)` 注入。
-- **机器人 / ROS 复用**：`TrackManager` 无 cv2、无全局状态，可复用；`app.py` 的主循环需要改造（时间戳随帧传入、事件化输出）。
+- **替换跟踪器**：实现 `init(frame, bbox) -> bool` / `update(frame) -> (bool, bbox)` 的对象即可通过 Tracker 端口注入。
+- **机器人 / ROS 复用**：`domain` 与 `application` 层无 cv2、无全局状态，可复用；`interfaces/cli.py` 的装配需要改造（时间戳随帧传入、事件化输出）。
 
 ## 已知限制
 
@@ -439,8 +528,8 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）在 Ubuntu 上跑 
 - 时间戳基于 FPS 估算，假定恒定帧率；`--loop` 回绕后与真实时间脱钩。
 - `matched` 字段返回的是“当帧目标列表下标对”，不是 `track_id`。
 - `--loop` 且不指定 `--max-frames` 时会无限运行。
-- YOLO 适配器未接入 CLI，且加载不可信 `.pt` 权重存在代码执行风险，见 [SECURITY.md](SECURITY.md)。
-- 检测间隔 `detection_interval` 的语义是“第 interval 帧起每 interval 帧检测一次”，短片段可能一次都不检测。
+- YOLO 检测依赖本地 `.pt` 权重，权重不随仓库分发、不自动下载；加载不可信权重存在代码执行风险，见 [SECURITY.md](SECURITY.md)。
+- 检测间隔（`--motion-interval` / `detector.interval`）的语义是“第 interval 帧起每 interval 帧检测一次”，短片段可能一次都不检测。
 
 ## 安全与隐私
 
