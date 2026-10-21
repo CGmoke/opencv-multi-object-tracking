@@ -68,6 +68,19 @@ def _parse_seed_box(text: str) -> Tuple[float, float, float, float]:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def _parse_aspect(text: str) -> Tuple[float, float]:
+    parts = [part for part in text.replace(";", ",").split(",") if part.strip()]
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError(f"expected MIN,MAX but got {text!r}")
+    try:
+        low, high = (float(part) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"aspect values must be numbers: {text!r}") from exc
+    if not 0.0 < low <= high:
+        raise argparse.ArgumentTypeError(f"expected 0 < MIN <= MAX, got {low},{high}")
+    return low, high
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROG,
@@ -220,6 +233,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="median blur kernel for salt/pepper noise (odd, 0 = off; try 3)",
     )
     parser.add_argument(
+        "--motion-temporal",
+        dest="motion_temporal",
+        type=int,
+        default=None,
+        help="AND the last N masks to reject flicker (1 = off, default 2, max 9)",
+    )
+    parser.add_argument(
+        "--motion-aspect",
+        dest="motion_aspect",
+        type=_parse_aspect,
+        default=None,
+        metavar="MIN,MAX",
+        help="allowed box aspect ratio w/h (default 0.1,10; rejects thin texture strips)",
+    )
+    parser.add_argument(
         "--motion-merge-iou",
         dest="motion_merge_iou",
         type=float,
@@ -368,6 +396,10 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.motion.blur_kernel = args.motion_blur
     if getattr(args, "motion_median", None) is not None:
         config.motion.median_kernel = args.motion_median
+    if getattr(args, "motion_temporal", None) is not None:
+        config.motion.temporal_frames = args.motion_temporal
+    if getattr(args, "motion_aspect", None) is not None:
+        config.motion.min_aspect, config.motion.max_aspect = args.motion_aspect
     if getattr(args, "motion_merge_iou", None) is not None:
         config.motion.merge_iou = args.motion_merge_iou
     if getattr(args, "motion_merge_gap", None) is not None:
@@ -456,6 +488,9 @@ def _build_motion(config: AppConfig) -> Optional[Any]:
         max_area_ratio=config.motion.max_area_ratio,
         blur_kernel=config.motion.blur_kernel,
         median_kernel=config.motion.median_kernel,
+        temporal_frames=config.motion.temporal_frames,
+        min_aspect=config.motion.min_aspect,
+        max_aspect=config.motion.max_aspect,
         min_fill_ratio=config.motion.min_fill_ratio,
         merge_iou=config.motion.merge_iou,
         merge_gap_px=config.motion.merge_gap_px,

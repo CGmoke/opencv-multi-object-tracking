@@ -163,6 +163,18 @@ class TestBuildConfig:
         assert config.motion.method == "knn"
         assert config.motion.dist2_threshold == 625
 
+    def test_motion_mask_flags(self):
+        args = build_parser().parse_args(
+            ["--motion", "--motion-temporal", "3", "--motion-aspect", "0.2,8"]
+        )
+        config = build_config(args)
+        assert config.motion.temporal_frames == 3
+        assert (config.motion.min_aspect, config.motion.max_aspect) == (0.2, 8.0)
+
+    def test_bad_aspect_flag_is_rejected(self):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["--motion-aspect", "8,0.2"])
+
     def test_motion_box_merge_and_nms_flags(self):
         args = build_parser().parse_args(
             [

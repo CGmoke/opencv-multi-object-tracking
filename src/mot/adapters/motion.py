@@ -6,12 +6,13 @@
 0. **输入预处理**：灰度化 + 小核高斯模糊（可选中值滤波）。传感器颗粒、压缩块噪声与
    微小纹理是后续误检的放大器，在进入背景模型前先压掉，成本极低；
 1. 背景建模本身把静止内容学成背景（静止物体不产生前景）；
-2. 形态学开运算 + 膨胀：去掉椒盐噪点、合并碎裂区域；
-3. **最小面积 / 最小边长 / 填充率**：滤掉小噪点、细长纹理与中空碎片；
-4. **最大面积占比**：滤掉整屏或大面积光照突变；
-5. **碎片合并**：把重叠/相接的局部框合并成一个整体框（避免一个物体被拆成多个）；
-6. **NMS**：抑制被整体框包含的局部框，优先输出覆盖整体的框；
-7. **连续命中 + 位移门限**：单帧闪烁与静止物体不进入管道。
+2. **时序一致性**：最近 N 帧掩码按位与，只保留持续存在的前景（压制闪烁噪点）；
+3. **形态学开运算 + 闭运算**：开运算去孤立噪点，闭运算填补目标内部孔洞并连接裂口；
+4. **最小面积 / 最小边长 / 长宽比 / 填充率**：滤掉小噪点、极细长条纹与中空碎片；
+5. **最大面积占比**：滤掉整屏或大面积光照突变；
+6. **碎片合并**：把重叠/相接的局部框合并成一个整体框（避免一个物体被拆成多个）；
+7. **NMS**：抑制被整体框包含的局部框，优先输出覆盖整体的框；
+8. **连续命中 + 位移门限**：单帧闪烁与静止物体不进入管道。
 
 检测器只负责“发现候选”，ID 生命周期、轨迹记录与绘制仍由
 ``TrackManager`` / ``TrackingSession`` 承担，因此本模块与跟踪逻辑正交。
@@ -27,7 +28,8 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Sequence, Tuple
+from collections import deque
+from typing import Any, Deque, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -60,6 +62,11 @@ class MotionDetector:
             平滑像素级高频噪声，避免传感器颗粒被背景模型判成前景。
         median_kernel: 中值滤波核边长（奇数，默认 ``0`` 关闭）。对椒盐/压缩噪点比高斯
             更强，代价是轻微抹掉细小纹理；``3`` 通常足够。
+        temporal_frames: 掩码时序一致性窗口（默认 ``2``）：最近 N 帧前景按位与后才进入
+            后续处理，可压掉只在单帧闪烁的噪点。``1`` 表示关闭。窗口越大越干净，但
+            快速移动目标的框会被交集裁窄，通常不要超过 ``3``。
+        min_aspect / max_aspect: 包围框长宽比（``w / h``）允许范围，默认 ``0.1~10``；
+            用于剔除极细长的纹理条纹（如灯管、百叶窗缝）。
         min_fill_ratio: 轮廓面积 / 包围框面积的下限；用于剔除中空、破碎的局部特征
             （``0`` 表示关闭）。
         merge_iou: 碎片合并的 IoU 阈值；重叠超过该值的局部框合并为一个整体框。
@@ -98,6 +105,9 @@ class MotionDetector:
         max_area_ratio: float = 0.6,
         blur_kernel: int = 5,
         median_kernel: int = 0,
+        temporal_frames: int = 2,
+        min_aspect: float = 0.1,
+        max_aspect: float = 10.0,
         min_fill_ratio: float = 0.0,
         merge_iou: float = 0.15,
         merge_gap_px: float = 0.0,
@@ -131,6 +141,12 @@ class MotionDetector:
         for name, value in (("blur_kernel", blur_kernel), ("median_kernel", median_kernel)):
             if int(value) < 0 or (int(value) != 0 and int(value) % 2 == 0):
                 raise ValueError(f"{name} must be 0 or a positive odd number, got {value}")
+        if int(temporal_frames) < 1:
+            raise ValueError(f"temporal_frames must be >= 1, got {temporal_frames}")
+        if not 0.0 < float(min_aspect) <= float(max_aspect):
+            raise ValueError(
+                f"min_aspect must be > 0 and <= max_aspect, got {min_aspect}/{max_aspect}"
+            )
         if not 0.0 <= float(min_fill_ratio) <= 1.0:
             raise ValueError(f"min_fill_ratio must be within [0, 1], got {min_fill_ratio}")
         if not 0.0 <= float(merge_iou) <= 1.0:
@@ -156,6 +172,9 @@ class MotionDetector:
         self.max_area_ratio = float(max_area_ratio)
         self.blur_kernel = int(blur_kernel)
         self.median_kernel = int(median_kernel)
+        self.temporal_frames = int(temporal_frames)
+        self.min_aspect = float(min_aspect)
+        self.max_aspect = float(max_aspect)
         self.min_fill_ratio = float(min_fill_ratio)
         self.merge_iou = float(merge_iou)
         self.merge_gap_px = float(merge_gap_px)
@@ -177,6 +196,7 @@ class MotionDetector:
         self._frame_count = 0
         self._size: Optional[Tuple[int, int]] = None  # (width, height)
         self._candidates: List[Tuple[float, float, int, float, float]] = []
+        self._masks: Deque[np.ndarray] = deque(maxlen=self.temporal_frames)
         self._background = self._make_background()
         self._learning_rate = float(learning_rate)
 
@@ -222,8 +242,10 @@ class MotionDetector:
         # fgmask，导致学习率静默失效（物体躯干被吸收，只剩前沿窄条）。
         mask = self._background.apply(prepared, learningRate=rate)
         if warming:
+            self._masks.append(mask)  # 预热期也维护时序窗口，首帧检测即有历史
             return []
 
+        mask = self._stabilize(mask)
         mask = self._clean_mask(mask)
         candidates = self._find_candidates(mask, width, height)
         matched = self._apply_persistence(candidates)
@@ -239,8 +261,9 @@ class MotionDetector:
         return detections
 
     def reset(self, *, keep_background: bool = False) -> None:
-        """清空候选状态；``keep_background=False`` 时同时重建背景模型。"""
+        """清空候选与时序窗口；``keep_background=False`` 时同时重建背景模型。"""
         self._candidates.clear()
+        self._masks.clear()
         if not keep_background:
             self._background = self._make_background()
             self._frame_count = 0
@@ -260,15 +283,32 @@ class MotionDetector:
             gray = cv2.medianBlur(gray, self.median_kernel)
         return gray
 
+    def _stabilize(self, mask: np.ndarray) -> np.ndarray:
+        """时序一致性：最近 ``temporal_frames`` 帧掩码按位与。
+
+        只在单帧出现的噪点、边缘抖动与压缩闪烁无法通过多帧交集，从源头被压掉；
+        真实目标连续存在，交集后仍保留（快速目标的框会略被裁窄，故窗口默认仅 2）。
+        历史不足时返回全零掩码，等价于“延后 N-1 帧再输出”。
+        """
+        self._masks.append(mask)
+        if self.temporal_frames <= 1:
+            return mask
+        if len(self._masks) < self.temporal_frames:
+            return np.zeros_like(mask)
+        stable = self._masks[0]
+        for previous in list(self._masks)[1:]:
+            stable = cv2.bitwise_and(stable, previous)
+        return stable
+
     def _clean_mask(self, mask: np.ndarray) -> np.ndarray:
-        """形态学清理：开运算去噪点，膨胀合并同一物体的碎裂区域。"""
+        """形态学清理：开运算去孤立噪点，闭运算填补孔洞、连接裂口。"""
         if self._morph_kernel <= 1:
             return mask
         kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (self._morph_kernel, self._morph_kernel)
         )
         opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        return cv2.dilate(opened, kernel, iterations=1)
+        return cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel)
 
     def _find_candidates(
         self, mask: np.ndarray, width: int, height: int
@@ -289,6 +329,9 @@ class MotionDetector:
             x, y, w, h = cv2.boundingRect(contour)
             if w < self.min_width_px or h < self.min_height_px:
                 continue
+            aspect = float(w) / float(h)
+            if aspect < self.min_aspect or aspect > self.max_aspect:
+                continue  # 极细长条纹：灯管 / 百叶窗缝 / 地平线纹理
             if (float(w) * float(h)) / frame_area > self.max_area_ratio:
                 continue
             if self.min_fill_ratio > 0.0 and area / float(w * h) < self.min_fill_ratio:

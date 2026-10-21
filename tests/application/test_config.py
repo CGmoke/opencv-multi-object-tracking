@@ -192,6 +192,8 @@ class TestMotionSection:
         assert motion.method == "mog2"
         assert motion.var_threshold == 25.0
         assert motion.dist2_threshold == 400.0
+        assert motion.temporal_frames == 2
+        assert (motion.min_aspect, motion.max_aspect) == (0.1, 10.0)
         assert motion.min_area_px == 200.0
         assert motion.pixels_per_meter is None
 
@@ -201,6 +203,9 @@ class TestMotionSection:
             "  var_threshold: 0\n",
             "  method: yolo\n",
             "  dist2_threshold: 0\n",
+            "  temporal_frames: 0\n",
+            "  min_aspect: 0\n",
+            "  min_aspect: 5\n  max_aspect: 2\n",
             "  min_area_px: -1\n",
             "  min_width_px: 0\n",
             "  min_consecutive: 0\n",

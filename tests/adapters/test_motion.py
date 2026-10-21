@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from typing import List, Sequence
 
 import numpy as np
@@ -51,7 +52,7 @@ def test_both_background_methods_detect_a_moving_object(method):
     warm_up(detector)
     detections = feed_moving(detector)
     assert detections, f"{method} should detect the moving object"
-    assert detections[0].bbox[2] >= 30
+    assert detections[0].bbox[2] >= 20
 
 
 def test_method_is_normalised_to_lower_case():
@@ -153,12 +154,13 @@ def test_resolution_change_rebuilds_the_model():
 
 
 def test_reset_clears_candidates():
-    detector = MotionDetector(warmup_frames=20)
+    detector = MotionDetector(warmup_frames=20, temporal_frames=1)
     warm_up(detector)
     detector(with_box(60, 90), 0.0)  # 首次出现即建立候选（尚未输出）
     assert detector._candidates
     detector.reset()
     assert detector._candidates == []
+    assert detector._masks == deque(maxlen=1)
 
 
 def test_fragments_of_one_object_are_merged_into_one_whole_box():
@@ -242,6 +244,60 @@ def test_zero_kernels_disable_the_filters():
     assert np.array_equal(prepared, cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
 
 
+def test_temporal_and_rejects_a_single_frame_flicker():
+    """只在 1 帧出现的噪点斑块不得进入候选（窗口=2 的掩码交集为空）。"""
+    detector = MotionDetector(warmup_frames=20, temporal_frames=2, min_consecutive=1)
+    warm_up(detector)
+    blank_mask = np.zeros((HEIGHT, WIDTH), dtype=np.uint8)
+    blob = np.zeros((HEIGHT, WIDTH), dtype=np.uint8)
+    cv2.rectangle(blob, (200, 40), (280, 120), 255, -1)
+
+    assert np.count_nonzero(detector._stabilize(blank_mask)) == 0
+    assert np.count_nonzero(detector._stabilize(blob)) == 0  # 与上一帧无交集
+    assert np.count_nonzero(detector._stabilize(blob)) > 0  # 连续出现才保留
+
+
+def test_temporal_and_waits_for_a_full_window():
+    detector = MotionDetector(warmup_frames=0, temporal_frames=3)
+    mask = np.zeros((HEIGHT, WIDTH), dtype=np.uint8)
+    cv2.rectangle(mask, (40, 40), (120, 120), 255, -1)
+    assert np.count_nonzero(detector._stabilize(mask)) == 0
+    assert np.count_nonzero(detector._stabilize(mask)) == 0
+    assert np.count_nonzero(detector._stabilize(mask)) > 0
+
+
+def test_temporal_window_is_cleared_on_reset():
+    detector = MotionDetector(warmup_frames=0, temporal_frames=3)
+    detector._stabilize(np.full((HEIGHT, WIDTH), 255, dtype=np.uint8))
+    detector.reset()
+    assert len(detector._masks) == 0
+
+
+def test_morphology_closing_fills_pinholes():
+    detector = MotionDetector(warmup_frames=0, morph_kernel=3)
+    mask = np.zeros((HEIGHT, WIDTH), dtype=np.uint8)
+    cv2.rectangle(mask, (40, 40), (120, 120), 255, -1)
+    mask[80, 80] = 0  # 1px 孔洞
+    cleaned = detector._clean_mask(mask)
+    assert cleaned[80, 80] == 255
+
+
+def test_extreme_aspect_ratio_is_rejected():
+    mask = np.zeros((HEIGHT, WIDTH), dtype=np.uint8)
+    cv2.rectangle(mask, (20, 100), (300, 120), 255, -1)  # 281x21，横向长条
+    loose = MotionDetector(warmup_frames=0, min_area_px=200, max_aspect=20.0)
+    strict = MotionDetector(warmup_frames=0, min_area_px=200)  # 默认 max_aspect=10
+    assert len(loose._find_candidates(mask, WIDTH, HEIGHT)) == 1
+    assert strict._find_candidates(mask, WIDTH, HEIGHT) == []
+
+
+def test_vertical_strip_is_rejected_by_min_aspect():
+    mask = np.zeros((HEIGHT, WIDTH), dtype=np.uint8)
+    cv2.rectangle(mask, (150, 10), (170, 230), 255, -1)  # 21x221，纵向细条
+    detector = MotionDetector(warmup_frames=0, min_area_px=200)
+    assert detector._find_candidates(mask, WIDTH, HEIGHT) == []
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -255,6 +311,9 @@ def test_zero_kernels_disable_the_filters():
         {"blur_kernel": -1},
         {"blur_kernel": 4},
         {"median_kernel": 2},
+        {"temporal_frames": 0},
+        {"min_aspect": 0.0},
+        {"min_aspect": 5.0, "max_aspect": 2.0},
         {"min_fill_ratio": -0.1},
         {"min_fill_ratio": 1.1},
         {"merge_iou": -0.1},

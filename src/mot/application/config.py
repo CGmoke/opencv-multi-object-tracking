@@ -257,6 +257,8 @@ class MotionConfig:
         * ``min_motion_px``：位移门限，用于排除静止物体；
         * ``min_consecutive``：连续命中帧数，用于抑制噪点；
         * ``blur_kernel`` / ``median_kernel``：输入灰度图的高斯 / 中值滤波核（压噪）；
+        * ``temporal_frames``：最近 N 帧掩码按位与，压掉单帧闪烁；
+        * ``min_aspect`` / ``max_aspect``：长宽比范围，剔极细长纹理；
         * ``min_fill_ratio``：轮廓填充率下限，剔中空/破碎的局部特征；
         * ``merge_iou`` / ``merge_gap_px``：同一物体碎片框的合并条件（间隙默认 0，
           只合并重叠/相接的框，避免误合并相邻物体）；
@@ -278,6 +280,9 @@ class MotionConfig:
     max_area_ratio: float = 0.6
     blur_kernel: int = 5
     median_kernel: int = 0
+    temporal_frames: int = 2
+    min_aspect: float = 0.1
+    max_aspect: float = 10.0
     min_fill_ratio: float = 0.0
     merge_iou: float = 0.15
     merge_gap_px: float = 0.0
@@ -313,6 +318,14 @@ class MotionConfig:
         self.max_area_ratio = _as_float(self.max_area_ratio, "motion.max_area_ratio", 1e-6, 1.0)
         self.blur_kernel = _as_kernel(self.blur_kernel, "motion.blur_kernel")
         self.median_kernel = _as_kernel(self.median_kernel, "motion.median_kernel")
+        self.temporal_frames = _as_int(self.temporal_frames, "motion.temporal_frames", 1, 9)
+        self.min_aspect = _as_float(self.min_aspect, "motion.min_aspect", 1e-6, 1000.0)
+        self.max_aspect = _as_float(self.max_aspect, "motion.max_aspect", 1e-6, 1000.0)
+        if self.max_aspect < self.min_aspect:
+            raise ConfigError(
+                "motion.max_aspect must be >= motion.min_aspect, "
+                f"got min_aspect={self.min_aspect}, max_aspect={self.max_aspect}"
+            )
         self.min_fill_ratio = _as_float(self.min_fill_ratio, "motion.min_fill_ratio", 0.0, 1.0)
         self.merge_iou = _as_float(self.merge_iou, "motion.merge_iou", 0.0, 1.0)
         self.merge_gap_px = _as_float(self.merge_gap_px, "motion.merge_gap_px", 0.0, 1e9)

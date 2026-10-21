@@ -76,6 +76,13 @@ motion:
   # Median blur kernel (odd, 0 = off). Stronger against salt/pepper and JPEG
   # artifacts; 3 is usually enough.
   median_kernel: 0
+  # Temporal consistency: AND the last N foreground masks so single-frame flicker
+  # and edge jitter never reach the contour stage. 1 disables it; keep N <= 3,
+  # because the intersection trims the box of fast-moving targets.
+  temporal_frames: 2
+  # Allowed box aspect ratio w/h; rejects extremely thin texture strips.
+  min_aspect: 0.1
+  max_aspect: 10.0
   # Reject hollow/fragmented contours below this contour/box fill ratio (0 = off).
   min_fill_ratio: 0.0
   # Fragment merging: boxes of the same object (IoU >= merge_iou, or edge gap
