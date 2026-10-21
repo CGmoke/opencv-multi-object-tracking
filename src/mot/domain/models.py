@@ -198,6 +198,8 @@ class TrackedObject:
     created_frame: int = 0
     last_seen_frame: int = 0
     trail: Deque[Point] = field(default_factory=deque)
+    #: 最近的原始包围盒（滑动平均平滑用；由 ``TrackManager`` 维护）。
+    box_history: Deque[BBox] = field(default_factory=deque)
 
     @property
     def center(self) -> Point:

@@ -133,6 +133,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="drop detections whose box size jumps beyond this ratio vs the track (1 = off)",
     )
     parser.add_argument(
+        "--min-hits",
+        dest="min_hits",
+        type=int,
+        default=None,
+        help="hits before a track is confirmed and rendered (default 3; unconfirmed die on miss)",
+    )
+    parser.add_argument(
+        "--smooth-window",
+        dest="smooth_window",
+        type=int,
+        default=None,
+        help="moving-average window for boxes and trails (<=1 = off, default 5)",
+    )
+    parser.add_argument(
         "--match-method",
         choices=list(MATCH_METHODS),
         default=None,
@@ -388,6 +402,10 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.tracking.box_smoothing = args.box_smoothing
     if getattr(args, "max_box_change", None) is not None:
         config.tracking.max_box_change = args.max_box_change
+    if getattr(args, "min_hits", None) is not None:
+        config.tracking.min_hits = args.min_hits
+    if getattr(args, "smooth_window", None) is not None:
+        config.tracking.smooth_window = args.smooth_window
     if args.detector is not None:
         config.detector.backend = args.detector
     if args.detector_model is not None:
@@ -577,6 +595,8 @@ def run(config: AppConfig) -> int:
             match_method=config.tracking.match_method,
             max_tracks=config.tracking.max_tracks,
             box_smoothing=config.tracking.box_smoothing,
+            min_hits=config.tracking.min_hits,
+            smooth_window=config.tracking.smooth_window,
         )
         detector = build_detector(config)
         motion_mode = detector is None and config.motion.enabled

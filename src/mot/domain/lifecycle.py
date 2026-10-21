@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+from collections import deque
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .association import MATCH_METHODS, match
@@ -68,6 +69,10 @@ class TrackManager:
             而非无限增长内存。
         box_smoothing: 检测框 EMA 平滑系数（``0 < alpha <= 1``）。``1`` 表示直接使用
             检测框；调小可抑制检测框抖动，但会带来轻微滞后。仅在用检测重锚时生效。
+        min_hits: 轨迹确认所需的命中数（默认 ``1`` 即不确认）。未确认的“暂定轨迹”
+            不向渲染/导出输出，且一次丢失就立即销毁，用于过滤 1~2 帧的误检。
+        smooth_window: 包围盒滑动平均窗口（``<=1`` 关闭）。开启后对跟踪器输出与检测框
+            都做窗口平均，轨迹点因此更平滑；优先级高于 ``box_smoothing``。
     """
 
     def __init__(
@@ -83,6 +88,8 @@ class TrackManager:
         id_allocator: Optional[IdAllocator] = None,
         max_tracks: int = 256,
         box_smoothing: float = 1.0,
+        min_hits: int = 1,
+        smooth_window: int = 0,
     ) -> None:
         if match_method not in MATCH_METHODS:
             raise ValidationError(
@@ -96,6 +103,16 @@ class TrackManager:
                 field="box_smoothing",
                 value=box_smoothing,
             )
+        if int(min_hits) < 1:
+            raise ValidationError(
+                f"min_hits must be >= 1, got {min_hits}", field="min_hits", value=min_hits
+            )
+        if int(smooth_window) < 0:
+            raise ValidationError(
+                f"smooth_window must be >= 0, got {smooth_window}",
+                field="smooth_window",
+                value=smooth_window,
+            )
 
         self._tracker_factory = tracker_factory
         self._init_fn = init_fn
@@ -106,6 +123,9 @@ class TrackManager:
         self.match_method = match_method
         self.max_tracks = validate_max_tracks(max_tracks)
         self.box_smoothing = float(box_smoothing)
+        self.min_hits = int(min_hits)
+        self.smooth_window = int(smooth_window)
+        self.tentative_dropped = 0
         self._capacity_warned = False
         self._allocator = id_allocator or IdAllocator()
         self._tracks: Dict[int, TrackedObject] = {}
@@ -124,6 +144,15 @@ class TrackManager:
     def active_tracks(self) -> Tuple[TrackedObject, ...]:
         """仅 ``ACTIVE`` 状态的目标。"""
         return tuple(t for t in self.tracks if t.is_active)
+
+    @property
+    def confirmed_tracks(self) -> Tuple[TrackedObject, ...]:
+        """命中数达到 ``min_hits`` 的轨迹（渲染与导出只应使用这一组）。"""
+        return tuple(t for t in self.tracks if self.is_confirmed(t))
+
+    def is_confirmed(self, track: TrackedObject) -> bool:
+        """该轨迹是否已经过确认（``min_hits=1`` 时恒为 ``True``）。"""
+        return track.hits >= self.min_hits
 
     @property
     def allocator(self) -> IdAllocator:
@@ -169,7 +198,12 @@ class TrackManager:
             else:
                 track.misses += 1
                 track.state = TrackState.LOST
-                if track.misses > self.max_missing:
+                if not self.is_confirmed(track):
+                    # 暂定轨迹：一次丢失立即销毁（不进 removed 事件，避免噪声事件）
+                    del self._tracks[track_id]
+                    self.total_removed += 1
+                    self.tentative_dropped += 1
+                elif track.misses > self.max_missing:
                     del self._tracks[track_id]
                     self.total_removed += 1
                     removed.append(track_id)
@@ -275,6 +309,7 @@ class TrackManager:
         return clip_bbox(box, width, height)
 
     def _accept_box(self, track: TrackedObject, box: BBox, frame_index: int) -> None:
+        box = self._smooth_box(track, box)
         track.bbox = box
         track.state = TrackState.ACTIVE
         track.hits += 1
@@ -289,14 +324,15 @@ class TrackManager:
             ``True`` 表示刷新成功；``False`` 表示初始化失败（已降级为一次 miss
             并转为 ``LOST``，异常不外泄）。
         """
-        box = self._smooth_box(track, detection.bbox)
+        raw = normalize_bbox(detection.bbox)
         try:
-            self._init_fn(track.tracker, frame, box)
+            self._init_fn(track.tracker, frame, raw)  # 跟踪器用原始检测框，避免滞后
         except Exception as exc:  # noqa: BLE001 - 非致命：单次重锚失败不得中断主循环
             LOGGER.warning("re-init failed for id %s: %s", track.track_id, exc)
             track.misses += 1
             track.state = TrackState.LOST
             return False
+        box = self._smooth_box(track, raw)
         track.bbox = box
         track.label = detection.label
         track.confidence = detection.confidence
@@ -304,7 +340,29 @@ class TrackManager:
         return True
 
     def _smooth_box(self, track: TrackedObject, box: BBox) -> BBox:
-        """检测框 EMA 平滑；LOST 目标重新出现时直接吸附，避免“缓慢追框”。"""
+        """包围盒平滑：优先滑动平均（``smooth_window``），否则 EMA（``box_smoothing``）。
+
+        滑动平均窗口对跟踪器输出与检测框一律生效，轨迹点（中心）随之平滑。
+        ``LOST`` 目标重新出现时清空历史并直接吸附，避免旧框拖拽新位置。
+        """
+        if self.smooth_window > 1:
+            if track.state is TrackState.LOST:
+                track.box_history.clear()
+            if track.box_history.maxlen != self.smooth_window:
+                track.box_history = deque(track.box_history, maxlen=self.smooth_window)
+            track.box_history.append(box)
+            count = float(len(track.box_history))
+            sums = [0.0, 0.0, 0.0, 0.0]
+            for item in track.box_history:
+                for index in range(4):
+                    sums[index] += item[index]
+            return (
+                sums[0] / count,
+                sums[1] / count,
+                sums[2] / count,
+                sums[3] / count,
+            )
+
         alpha = self.box_smoothing
         if alpha >= 1.0 or track.state is TrackState.LOST:
             return box
@@ -342,7 +400,10 @@ class TrackManager:
             hits=1,
             created_frame=frame_index,
             last_seen_frame=frame_index,
+            box_history=deque(maxlen=self.smooth_window if self.smooth_window > 1 else 0),
         )
+        if self.smooth_window > 1:
+            track.box_history.append(track.bbox)
         track.push_trail(bbox_center(track.bbox), self.trail_length)
         self._tracks[track.track_id] = track
         self.total_created += 1

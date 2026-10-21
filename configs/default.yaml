@@ -32,6 +32,12 @@ tracking:
   # EMA alpha applied when a detection re-anchors an existing id.
   # 1.0 = use the detection box as-is; smaller = steadier box, slightly laggier.
   box_smoothing: 1.0
+  # Track lifecycle: a track is confirmed after this many hits; tentative tracks are
+  # not rendered/exported and are destroyed on their very first miss.
+  min_hits: 3
+  # Moving-average window for boxes (and thus trail centres). <=1 disables it and
+  # takes precedence over box_smoothing when > 1.
+  smooth_window: 5
   # Track-level sanity check: drop a detection whose width/height differs from the
   # overlapping track's box by more than this ratio (fragment/local box). 1.0 = off.
   max_box_change: 1.6

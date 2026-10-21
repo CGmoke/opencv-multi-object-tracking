@@ -119,6 +119,10 @@ class TrackingConfig:
     max_tracks: int = 256
     #: 框平滑系数（EMA alpha）：``1`` 表示不平滑（直接用检测框），越小框越稳但越滞后。
     box_smoothing: float = 1.0
+    #: 轨迹确认所需命中数；未确认的暂定轨迹不输出，且一次丢失就销毁。
+    min_hits: int = 3
+    #: 包围盒滑动平均窗口（``<=1`` 关闭；优先级高于 box_smoothing）。
+    smooth_window: int = 5
     #: 轨迹二次校验：与已有轨迹重叠但尺寸突变超过该倍率的检测被丢弃（1.0 关闭）。
     max_box_change: float = 1.6
 
@@ -148,6 +152,8 @@ class TrackingConfig:
         self.max_box_change = _as_float(
             self.max_box_change, "tracking.max_box_change", 1.0, 100.0
         )
+        self.min_hits = _as_int(self.min_hits, "tracking.min_hits", 1, 100_000)
+        self.smooth_window = _as_int(self.smooth_window, "tracking.smooth_window", 0, 999)
 
 
 @dataclass

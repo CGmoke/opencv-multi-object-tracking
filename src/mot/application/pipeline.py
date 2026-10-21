@@ -154,6 +154,7 @@ class MOTPipeline:
             "trail_points": sum(len(track.trail) for track in self._manager.tracks),
             "size_rejects": self.size_rejects,
             "static_removed": self.static_removed,
+            "tentative_dropped": self._manager.tentative_dropped,
         }
 
     # -- 单帧 ------------------------------------------------------------
@@ -184,12 +185,13 @@ class MOTPipeline:
         detections = self._dedupe(detections)
         result = self._manager.step(frame, detections)
         removed_static = self._drop_static_tracks()
+        # 轨迹生命周期过滤：未确认的暂定轨迹不进入渲染/导出/CSV。
+        tracks = tuple(track for track in result.tracks if self._manager.is_confirmed(track))
         if removed_static:
             dropped = set(removed_static)
-            tracks = tuple(track for track in result.tracks if track.track_id not in dropped)
+            tracks = tuple(track for track in tracks if track.track_id not in dropped)
             removed = result.removed + removed_static
         else:
-            tracks = result.tracks
             removed = result.removed
         return FrameResult(
             frame_index=self._manager.frame_index,
@@ -282,7 +284,7 @@ class MOTPipeline:
 
         removed: List[int] = []
         for track in self._manager.tracks:
-            if not track.is_active:
+            if not track.is_active or not self._manager.is_confirmed(track):
                 self._static_anchor.pop(track.track_id, None)
                 self._static_hits.pop(track.track_id, None)
                 continue

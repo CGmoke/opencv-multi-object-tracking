@@ -105,6 +105,8 @@ class TestValidation:
             ("tracking", "  box_smoothing: 1.5\n"),
             ("tracking", "  max_box_change: 0.5\n"),
             ("tracking", "  max_box_change: 101\n"),
+            ("tracking", "  min_hits: 0\n"),
+            ("tracking", "  smooth_window: -1\n"),
             ("source", "  max_frames: 0\n"),
             ("source", "  loop: 'yes'\n"),
             ("source", "  source: ''\n"),
@@ -198,6 +200,9 @@ class TestMotionSection:
         assert (motion.min_aspect, motion.max_aspect) == (0.1, 10.0)
         assert motion.static_iou == 0.95
         assert motion.static_frames == 30
+        tracking = AppConfig.defaults().tracking
+        assert tracking.min_hits == 3
+        assert tracking.smooth_window == 5
         assert motion.min_area_px == 200.0
         assert motion.pixels_per_meter is None
 

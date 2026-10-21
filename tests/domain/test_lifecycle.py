@@ -94,6 +94,77 @@ class TestBoxSmoothing:
         assert manager.get(1).bbox == (20.0, 10.0, 20.0, 20.0)
 
 
+class TestLifecycleFiltering:
+    def test_tentative_track_dies_on_its_first_miss(self, make_manager, pool):
+        manager = make_manager(pool, min_hits=3)
+        manager.step(None, [Detection(BOX)])
+        pool.trackers[0].alive = False
+        result = manager.step(None)
+        assert manager.get(1) is None  # 未确认 → 不保留 max_missing 宽限
+        assert result.removed == ()  # 不产生移除事件
+        assert manager.tentative_dropped == 1
+
+    def test_confirmed_track_keeps_its_grace_period(self, make_manager, pool):
+        manager = make_manager(pool, min_hits=2, max_missing=3)
+        manager.step(None, [Detection(BOX)])
+        manager.step(None)  # hits=2 → 已确认
+        pool.trackers[0].alive = False
+        manager.step(None)
+        assert manager.get(1) is not None
+        assert manager.tentative_dropped == 0
+
+    def test_confirmed_view_excludes_tentative_tracks(self, make_manager, pool):
+        manager = make_manager(pool, min_hits=3)
+        manager.step(None, [Detection(BOX)])
+        assert manager.confirmed_tracks == ()
+        manager.step(None)
+        manager.step(None)
+        assert [track.track_id for track in manager.confirmed_tracks] == [1]
+
+    def test_min_hits_one_confirms_immediately(self, manager):
+        manager.step(None, [Detection(BOX)])
+        assert [track.track_id for track in manager.confirmed_tracks] == [1]
+
+
+class TestBoxSmoothingWindow:
+    def test_moving_average_blends_the_last_frames(self, make_manager, tracker_pool):
+        pool = tracker_pool(dx=6.0)
+        manager = make_manager(pool, smooth_window=3)
+        manager.step(None, [Detection(BOX)])  # 原始 (10,10,20,20)
+        manager.step(None)  # 原始 16 → 均值 (10+16)/2 = 13
+        assert manager.get(1).bbox == (13.0, 10.0, 20.0, 20.0)
+        manager.step(None)  # 原始 22 → 均值 (10+16+22)/3 = 16
+        assert manager.get(1).bbox == (16.0, 10.0, 20.0, 20.0)
+        manager.step(None)  # 原始 28 → 均值 (16+22+28)/3 = 22
+        assert manager.get(1).bbox == (22.0, 10.0, 20.0, 20.0)
+
+    def test_trail_centres_follow_the_smoothed_box(self, make_manager, tracker_pool):
+        pool = tracker_pool(dx=6.0)
+        manager = make_manager(pool, smooth_window=3)
+        manager.step(None, [Detection(BOX)])
+        manager.step(None)
+        manager.step(None)
+        assert list(manager.get(1).trail) == [(20.0, 20.0), (23.0, 20.0), (26.0, 20.0)]
+
+    def test_detection_refresh_is_also_smoothed(self, make_manager, pool):
+        manager = make_manager(pool, smooth_window=3)
+        manager.step(None, [Detection(BOX)])
+        manager.step(None, [Detection((20, 10, 20, 20))])
+        # 窗口内是 10(初始)、10(跟踪器)、20(检测) → 均值 13.33
+        assert manager.get(1).bbox[0] == pytest.approx(40 / 3)
+        assert manager.get(1).bbox[1:] == (10.0, 20.0, 20.0)
+
+    def test_lost_track_snaps_instead_of_blending_stale_boxes(self, make_manager, pool):
+        manager = make_manager(pool, smooth_window=5, max_missing=5)
+        manager.step(None, [Detection(BOX)])
+        manager.step(None)
+        pool.trackers[0].alive = False
+        manager.step(None)  # LOST
+        manager.step(None, [Detection((20, 10, 20, 20))])
+        # 若与历史混合会得到 12；吸附应直接采用新框
+        assert manager.get(1).bbox == (20.0, 10.0, 20.0, 20.0)
+
+
 class TestLossAndExpiry:
     def test_track_keeps_its_id_while_missing(self, make_manager, pool):
         manager = make_manager(pool, max_missing=3)

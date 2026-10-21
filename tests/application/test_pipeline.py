@@ -267,6 +267,27 @@ class TestStaticTrackRemoval:
             MOTPipeline(make_manager(pool), static_iou=0.0)
 
 
+class TestLifecycleFiltering:
+    def test_tentative_tracks_are_hidden_from_frame_result(self, make_manager, pool):
+        manager = make_manager(pool, min_hits=3)
+        pipeline = MOTPipeline(manager)
+        first = pipeline.step(None, extra_detections=[Detection(BOX)])
+        assert first.created == (1,)
+        assert first.tracks == ()  # 未确认 → 不输出
+        pipeline.step(None)
+        assert pipeline.step(None).tracks  # hits=3 → 确认并输出
+
+    def test_tentative_track_disappears_after_a_miss(self, make_manager, pool):
+        manager = make_manager(pool, min_hits=3)
+        pipeline = MOTPipeline(manager)
+        pipeline.step(None, extra_detections=[Detection(BOX)])
+        pool.trackers[0].alive = False
+        result = pipeline.step(None)
+        assert result.tracks == ()
+        assert result.removed == ()
+        assert pipeline.stats()["tentative_dropped"] == 1
+
+
 class TestDetectionNormalisation:
     def test_tuples_are_accepted(self, make_manager, pool):
         pipeline = make_pipeline(make_manager, pool)

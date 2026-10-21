@@ -395,6 +395,8 @@ class SessionRegistry:
             match_method=config.tracking.match_method,
             max_tracks=config.tracking.max_tracks,
             box_smoothing=config.tracking.box_smoothing,
+            min_hits=config.tracking.min_hits,
+            smooth_window=config.tracking.smooth_window,
         )
         detector = _build_detector(config)
         motion_mode = config.detector.backend == "none" and config.motion.enabled
