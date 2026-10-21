@@ -177,6 +177,7 @@ function updateCard(session) {
   card.querySelector(".state").textContent = session.state;
   card.querySelector(".stats").innerHTML = `
     <dt>帧</dt><dd>${session.frames ?? 0}</dd>
+    <dt>帧率</dt><dd>CAP ${(session.capture_fps ?? 0).toFixed(1)} / PROC ${(session.process_fps ?? 0).toFixed(1)} / STR ${(session.stream_fps ?? 0).toFixed(1)}</dd>
     <dt>在线 ID</dt><dd>${session.active ?? 0}</dd>
     <dt>新建 ID</dt><dd>${session.created_ids ?? 0}</dd>
     <dt>销毁 ID</dt><dd>${session.removed_ids ?? 0}</dd>

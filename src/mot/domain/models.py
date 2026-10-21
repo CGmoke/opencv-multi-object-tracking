@@ -104,6 +104,12 @@ def bbox_area(bbox: Sequence[float]) -> float:
     return max(0.0, float(w)) * max(0.0, float(h))
 
 
+def bbox_diagonal(bbox: Sequence[float]) -> float:
+    """返回包围盒对角线长度（像素），用于尺度无关的距离阈值。"""
+    _, _, w, h = bbox
+    return math.hypot(max(0.0, float(w)), max(0.0, float(h)))
+
+
 def bbox_contains(bbox: Sequence[float], point: Point) -> bool:
     """判断 ``point`` 是否落在盒内（含边界）。"""
     x, y, w, h = bbox
@@ -317,6 +323,7 @@ __all__ = [
     "bbox_area",
     "bbox_center",
     "bbox_contains",
+    "bbox_diagonal",
     "clip_bbox",
     "normalize_bbox",
 ]

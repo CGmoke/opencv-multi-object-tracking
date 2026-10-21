@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 from mot.domain.errors import ValidationError
@@ -391,6 +394,80 @@ class TestBookkeeping:
         assert manager.get(42) is not None
 
 
+class TestParallelUpdates:
+    """实验性并行 update：只并行纯计算，状态机仍在主线程按序执行。"""
+
+    @staticmethod
+    def _init(tracker, frame, bbox) -> None:
+        tracker.init(frame, bbox)
+
+    @staticmethod
+    def _update(tracker, frame):
+        ok, box = tracker.update(frame)
+        return box if ok else None
+
+    def test_parallel_updates_use_multiple_threads(self, tracker_pool):
+        pool = tracker_pool()
+        calls = []
+        lock = threading.Lock()
+        main_thread = threading.get_ident()
+
+        def recording_update(tracker, frame):
+            with lock:
+                calls.append(threading.get_ident())
+            time.sleep(0.01)  # 保证多个 worker 真正重叠执行
+            return self._update(tracker, frame)
+
+        manager = TrackManager(
+            pool,
+            init_fn=self._init,
+            update_fn=recording_update,
+            min_hits=1,
+            max_parallel=4,
+        )
+        boxes = [(10.0 + 60.0 * index, 10.0, 20.0, 20.0) for index in range(8)]
+        manager.step(None, [Detection(box) for box in boxes])
+        calls.clear()
+        try:
+            manager.step(None)
+        finally:
+            manager.close()
+        assert len(calls) == 8
+        assert main_thread not in calls
+        assert len(set(calls)) >= 2
+
+    def test_parallel_and_serial_produce_identical_tracks(self, tracker_pool):
+        serial_pool = tracker_pool(dx=3.0)
+        parallel_pool = tracker_pool(dx=3.0)
+        serial = TrackManager(
+            serial_pool, init_fn=self._init, update_fn=self._update, max_parallel=0
+        )
+        parallel = TrackManager(
+            parallel_pool, init_fn=self._init, update_fn=self._update, max_parallel=4
+        )
+
+        def snapshot(manager):
+            return [
+                (track.track_id, track.bbox, track.state.value, track.hits, track.misses, track.age)
+                for track in manager.tracks
+            ]
+
+        boxes = [(10.0 + 60.0 * index, 10.0, 20.0, 20.0) for index in range(5)]
+        detections = [Detection(box) for box in boxes]
+        for manager in (serial, parallel):
+            manager.step(None, detections)
+        try:
+            assert snapshot(serial) == snapshot(parallel)
+            for _ in range(10):
+                serial_result = serial.step(None)
+                parallel_result = parallel.step(None)
+                assert serial_result.removed == parallel_result.removed
+                assert snapshot(serial) == snapshot(parallel)
+        finally:
+            parallel.close()
+            serial.close()
+
+
 class TestValidation:
     @pytest.mark.parametrize(
         "kwargs",
@@ -399,6 +476,8 @@ class TestValidation:
             {"iou_threshold": 1.1},
             {"max_missing": -1},
             {"max_coast": -1},
+            {"max_parallel": -1},
+            {"max_parallel": 257},
             {"trail_length": 0},
             {"match_method": "nope"},
             {"box_smoothing": 0.0},

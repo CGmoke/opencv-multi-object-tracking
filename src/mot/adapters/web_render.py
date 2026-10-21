@@ -53,12 +53,15 @@ class JpegRenderer:
         show_hud / show_trails / show_labels / trail_fade: 绘制开关。
         quality: JPEG 质量（1–100）。
         max_fps: 编码上限；超过则本帧不重编码（复用上一帧），避免慢客户端拖垮会话。
+        rates_fn: 可选回调，返回 ``capture_fps / process_fps / stream_fps`` 等实时速率，
+            用于在 HUD 中显示三段帧率。
     """
 
     def __init__(
         self,
         *,
         stats_fn: Callable[[], Dict[str, int]],
+        rates_fn: Optional[Callable[[], Dict[str, float]]] = None,
         source_name: str = "",
         backend: str = "csrt",
         show_hud: bool = True,
@@ -72,6 +75,7 @@ class JpegRenderer:
         large_min_m: float = 2.0,
     ) -> None:
         self._stats_fn = stats_fn
+        self._rates_fn = rates_fn
         self._source_name = source_name
         self._backend = backend
         self._show_hud = show_hud
@@ -87,6 +91,10 @@ class JpegRenderer:
         self.holder = LatestFrameHolder()
         self._last_encode = 0.0
         self.frames = 0
+
+    def set_rates_fn(self, rates_fn: Optional[Callable[[], Dict[str, float]]]) -> None:
+        """装配完成后回接三段帧率来源（解决会话与渲染器的创建顺序依赖）。"""
+        self._rates_fn = rates_fn
 
     def present(self, frame: Any, result: Any) -> Optional[str]:
         """绘制并编码一帧；始终返回 ``None``（无交互事件）。"""
@@ -112,6 +120,7 @@ class JpegRenderer:
         if self._show_hud:
             active = sum(1 for track in result.tracks if track.is_active)
             created = int(self._stats_fn().get("created_ids", 0))
+            rates = self._rates_fn() if self._rates_fn is not None else {}
             canvas = draw_hud(
                 canvas,
                 fps=self._fps.fps,
@@ -120,6 +129,9 @@ class JpegRenderer:
                 frame_index=int(result.frame_index),
                 backend=self._backend,
                 source_name=self._source_name,
+                capture_fps=rates.get("capture_fps"),
+                process_fps=rates.get("process_fps"),
+                stream_fps=rates.get("stream_fps"),
             )
         ok, buffer = cv2.imencode(".jpg", canvas, [int(cv2.IMWRITE_JPEG_QUALITY), self._quality])
         if ok:
@@ -142,11 +154,17 @@ def mjpeg_chunks(
     boundary: str = "motframe",
     fps: float = 15.0,
     should_stop: Optional[Callable[[], bool]] = None,
+    should_send: Optional[Callable[[], bool]] = None,
+    on_send: Optional[Callable[[], None]] = None,
 ) -> Iterator[bytes]:
     """把最新帧生成 MJPEG（``multipart/x-mixed-replace``）分块。
 
     仅在出现新帧（``holder.version`` 变化）时产出一块，否则按 ``fps`` 节流等待；
     ``should_stop()`` 为真时结束。客户端断开时由 WSGI 服务器关闭生成器。
+
+    ``should_send()`` 返回 ``False`` 时**跳过**该帧（把版本记为已消费，等待更新的
+    帧），因此慢客户端只会拿到最新画面，不会形成积压；``on_send()`` 在分块成功
+    产出后调用，用于统计真实推流速率。
     """
     interval = 1.0 / max(1.0, float(fps))
     marker = boundary.encode("ascii")
@@ -158,6 +176,9 @@ def mjpeg_chunks(
         jpeg = holder.get()
         if jpeg is not None and version != last_version:
             last_version = version
+            if should_send is not None and not should_send():
+                time.sleep(interval)
+                continue
             yield (
                 b"--"
                 + marker
@@ -167,6 +188,8 @@ def mjpeg_chunks(
                 + jpeg
                 + b"\r\n"
             )
+            if on_send is not None:
+                on_send()
         time.sleep(interval)
 
 

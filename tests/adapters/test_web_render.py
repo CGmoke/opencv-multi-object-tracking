@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import numpy as np
 import pytest
 
@@ -10,6 +13,7 @@ cv2 = pytest.importorskip("cv2")
 from mot.adapters.web_render import JpegRenderer, LatestFrameHolder, mjpeg_chunks  # noqa: E402
 from mot.application.pipeline import FrameResult  # noqa: E402
 from mot.domain.models import TrackedObject  # noqa: E402
+from mot.utils.fps import FrameBudget  # noqa: E402
 
 
 def frame(height: int = 120, width: int = 160) -> np.ndarray:
@@ -22,6 +26,33 @@ def result(frame_index: int = 1, tracks=()) -> FrameResult:
 
 def renderer(**kwargs) -> JpegRenderer:
     return JpegRenderer(stats_fn=lambda: {"created_ids": 0}, **kwargs)
+
+
+class TestFrameBudget:
+    """Web 会话三段帧率的滑动窗口与积压跳帧策略。"""
+
+    def test_rates_use_a_sliding_window(self):
+        budget = FrameBudget(window=3)
+        for stamp in (0.0, 1.0, 2.0, 3.0):
+            budget.mark_process(stamp)
+        for stamp in (0.0, 0.5):
+            budget.mark_capture(stamp)
+        for stamp in (0.0, 0.25):
+            budget.mark_stream(stamp)
+        snapshot = budget.snapshot()
+        assert snapshot["process_fps"] == pytest.approx(1.0)
+        assert snapshot["capture_fps"] == pytest.approx(2.0)
+        assert snapshot["stream_fps"] == pytest.approx(4.0)
+
+    def test_backlog_gate_skips_frames_until_the_interval_elapses(self):
+        budget = FrameBudget(target_fps=10.0)
+        for stamp in (0.0, 0.05, 0.10):  # 20 fps
+            budget.mark_process(stamp)
+        budget.mark_stream(0.0)
+        budget.mark_stream(0.20)  # 5 fps
+        assert budget.should_send(0.21) is False
+        assert budget.snapshot()["stream_skipped"] == 1
+        assert budget.should_send(0.31) is True
 
 
 class TestLatestFrameHolder:
@@ -79,3 +110,46 @@ class TestMjpegChunks:
         chunks = mjpeg_chunks(holder, fps=60.0, should_stop=lambda: True)
         with pytest.raises(StopIteration):
             next(chunks)
+
+    def test_skip_strategy_sends_latest_without_blocking_the_producer(self):
+        holder = LatestFrameHolder()
+        sent_versions = []
+        gaps = []
+        stop = threading.Event()
+
+        def produce():
+            last = time.monotonic()
+            for _ in range(200):
+                holder.set(b"jpegbytes")
+                now = time.monotonic()
+                gaps.append(now - last)
+                last = now
+                time.sleep(0.001)
+            stop.set()
+
+        producer = threading.Thread(target=produce)
+        producer.start()
+        allow = {"value": True}
+
+        def should_send():
+            allow["value"] = not allow["value"]
+            return allow["value"]
+
+        chunks = mjpeg_chunks(
+            holder,
+            fps=50.0,
+            should_stop=stop.is_set,
+            should_send=should_send,
+            on_send=lambda: sent_versions.append(holder.version),
+        )
+        try:
+            for _ in chunks:
+                pass
+        finally:
+            chunks.close()
+        producer.join(timeout=1.0)
+
+        assert not producer.is_alive()
+        assert sent_versions  # 至少成功推送一帧
+        assert holder.version > len(sent_versions) * 2  # 大量版本被跳过
+        assert max(gaps) < 0.1  # 生产线程（pipeline 侧）未被推流阻塞

@@ -47,6 +47,7 @@ from mot.domain.lifecycle import TrackManager
 from mot.domain.limits import SUPPORTED_BACKENDS
 from mot.domain.models import normalize_bbox
 from mot.interfaces.cli import build_config, build_parser
+from mot.utils.fps import FrameBudget
 from mot.utils.logging import setup_logging
 from mot.utils.paths import sanitize_filename
 
@@ -96,6 +97,7 @@ class SessionHandle:
         csv_path: Optional[Path],
         jsonl_path: Optional[Path],
         stats_fn: Callable[[], Dict[str, int]],
+        stream_fps: float = 15.0,
         spec: Any = None,
         seed_boxes: List[Any] = (),
     ) -> None:
@@ -109,6 +111,7 @@ class SessionHandle:
         self._renderer = renderer
         self._closers = list(closers)
         self._stats_fn = stats_fn
+        self._budget = FrameBudget(window=30, target_fps=stream_fps)
         self.csv_path = csv_path
         self.jsonl_path = jsonl_path
         self._events: Deque[_SessionRecord] = deque(maxlen=EVENT_BUFFER)
@@ -157,9 +160,28 @@ class SessionHandle:
                 except Exception:  # noqa: BLE001 - 关闭失败不影响其他清理
                     LOGGER.warning("failed to close a sink for session %s", self.id)
 
+    # -- 帧预算 ----------------------------------------------------------
+    def mark_capture(self, now: Optional[float] = None) -> None:
+        """记录一帧被接收（browser 为 POST 入队成功）。"""
+        self._budget.mark_capture(now)
+
+    def mark_stream(self, now: Optional[float] = None) -> None:
+        """记录一个 MJPEG 分块成功推给浏览器。"""
+        self._budget.mark_stream(now)
+
+    def should_send(self) -> bool:
+        """推流跳帧决策：积压时只推最新帧，不影响处理线程。"""
+        return self._budget.should_send()
+
+    def rates_snapshot(self) -> Dict[str, Any]:
+        return self._budget.snapshot()
+
     # -- EventSink -------------------------------------------------------
     def on_frame(self, result: Any) -> None:
         active = sum(1 for track in result.tracks if track.is_active)
+        if not isinstance(self._source, QueueFrameSource):
+            self._budget.mark_capture()  # 服务端源：read 与处理同拍
+        self._budget.mark_process()
         self._last_active = active
         if self._event_count % 10 == 0:  # 控制台日志：每 10 帧一次，避免刷屏
             LOGGER.info("session %s frame=%s active=%s", self.id, result.frame_index, active)
@@ -236,6 +258,7 @@ class SessionHandle:
         if isinstance(self._source, QueueFrameSource):
             snapshot["pushed"] = self._source.pushed
             snapshot["dropped"] = self._source.dropped
+        snapshot.update(self._budget.snapshot())
         return snapshot
 
 
@@ -392,6 +415,7 @@ class SessionRegistry:
             iou_threshold=config.tracking.iou_threshold,
             max_missing=config.tracking.max_missing,
             max_coast=config.tracking.max_coast,
+            max_parallel=config.tracking.max_parallel,
             trail_length=config.tracking.trail_length,
             match_method=config.tracking.match_method,
             max_tracks=config.tracking.max_tracks,
@@ -408,6 +432,9 @@ class SessionRegistry:
             max_box_change=config.tracking.max_box_change,
             static_iou=config.motion.static_iou,
             static_frames=config.motion.static_frames if motion_mode else 0,
+            dedupe_tracks=config.tracking.dedupe_tracks,
+            merge_track_iou=config.tracking.merge_track_iou,
+            merge_track_frames=config.tracking.merge_track_frames,
         )
 
         out_dir = _output_dir(config)
@@ -440,9 +467,11 @@ class SessionRegistry:
             csv_path=csv_path,
             jsonl_path=jsonl_path,
             stats_fn=pipeline.stats,
+            stream_fps=config.web.stream_fps,
             spec=spec,
             seed_boxes=seed_boxes,
         )
+        renderer.set_rates_fn(handle.rates_snapshot)
         session = TrackingSession(
             pipeline,
             source,
@@ -612,6 +641,8 @@ def create_app(registry: SessionRegistry) -> Flask:
             handle.renderer.holder,
             fps=registry.config.web.stream_fps,
             should_stop=lambda: handle.stopped,
+            should_send=handle.should_send,
+            on_send=handle.mark_stream,
         )
         return Response(
             stream_with_context(chunks),
@@ -630,6 +661,7 @@ def create_app(registry: SessionRegistry) -> Flask:
         if frame is None:
             return jsonify({"error": "body must be a JPEG image"}), 400
         source.push(frame)
+        handle.mark_capture()
         return jsonify({"ok": True, "pushed": source.pushed})
 
     return app
@@ -677,6 +709,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 __all__ = [
     "BROWSER_IDLE_TIMEOUT",
+    "FrameBudget",
     "UPLOAD_SUFFIXES",
     "SessionHandle",
     "SessionRegistry",

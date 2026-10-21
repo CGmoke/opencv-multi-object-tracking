@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from mot.domain.errors import ValidationError
-from mot.domain.geometry import box_iou, box_scale_change
+from mot.domain.geometry import box_iou, box_scale_change, pairwise_centroid_distance
 from mot.domain.lifecycle import TrackManager
 from mot.domain.limits import MAX_DETECTIONS
 from mot.domain.models import (
@@ -28,6 +28,7 @@ from mot.domain.models import (
     TrackedObject,
     bbox_area,
     bbox_contains,
+    bbox_diagonal,
     normalize_bbox,
 )
 
@@ -78,6 +79,10 @@ class MOTPipeline:
         static_iou: 静止判定的 IoU 阈值（默认 ``0.95``）。活跃目标在当前框与判定
             锚框的 IoU 连续 ``static_frames`` 帧不低于该值时，判定为“已静止”并销毁该 id。
         static_frames: 静止判定所需的连续帧数（默认 ``0`` 关闭；运动检测模式由配置开启）。
+        dedupe_tracks: 轨迹端去重开关（默认 ``True``）。检测端去重无法发现两个已建
+            id 各自漂移后重合的情况，这里按轨迹框 IoU 做兜底合并。
+        merge_track_iou: 判定两条轨迹属于同一物体的 IoU 阈值（默认 ``0.5``）。
+        merge_track_frames: 连续多少帧满足 IoU 才合并（默认 ``5``，防抖）。
     """
 
     def __init__(
@@ -88,6 +93,9 @@ class MOTPipeline:
         max_box_change: float = 1.6,
         static_iou: float = 0.95,
         static_frames: int = 0,
+        dedupe_tracks: bool = True,
+        merge_track_iou: float = 0.5,
+        merge_track_frames: int = 5,
     ) -> None:
         if detector is not None and not callable(detector):
             raise TypeError("detector must be callable: (frame, timestamp) -> Sequence[Detection]")
@@ -115,16 +123,39 @@ class MOTPipeline:
                 field="static_frames",
                 value=static_frames,
             )
+        if not isinstance(dedupe_tracks, bool):
+            raise ValidationError(
+                f"dedupe_tracks must be true/false, got {dedupe_tracks!r}",
+                field="dedupe_tracks",
+                value=dedupe_tracks,
+            )
+        if not 0.0 < float(merge_track_iou) <= 1.0:
+            raise ValidationError(
+                f"merge_track_iou must be within (0, 1], got {merge_track_iou}",
+                field="merge_track_iou",
+                value=merge_track_iou,
+            )
+        if int(merge_track_frames) < 1:
+            raise ValidationError(
+                f"merge_track_frames must be >= 1, got {merge_track_frames}",
+                field="merge_track_frames",
+                value=merge_track_frames,
+            )
         self._manager = manager
         self._detector = detector
         self._detection_interval = int(detection_interval)
         self.max_box_change = float(max_box_change)
         self.static_iou = float(static_iou)
         self.static_frames = int(static_frames)
+        self.dedupe_tracks = bool(dedupe_tracks)
+        self.merge_track_iou = float(merge_track_iou)
+        self.merge_track_frames = int(merge_track_frames)
         self.size_rejects = 0
         self.static_removed = 0
+        self.duplicate_removed = 0
         self._static_anchor: Dict[int, Tuple[float, float, float, float]] = {}
         self._static_hits: Dict[int, int] = {}
+        self._dup_streak: Dict[Tuple[int, int], int] = {}
         self._warned_size_jump = False
         self._since_detection = 0
         self.frame_count = 0
@@ -154,6 +185,7 @@ class MOTPipeline:
             "trail_points": sum(len(track.trail) for track in self._manager.tracks),
             "size_rejects": self.size_rejects,
             "static_removed": self.static_removed,
+            "duplicate_removed": self.duplicate_removed,
             "tentative_dropped": self._manager.tentative_dropped,
         }
 
@@ -184,13 +216,17 @@ class MOTPipeline:
         detections = self._reject_size_outliers(detections)
         detections = self._dedupe(detections)
         result = self._manager.step(frame, detections)
+        removed_duplicates = self._merge_duplicate_tracks(
+            result.tracks, self._manager.frame_index
+        )
         removed_static = self._drop_static_tracks()
         # 轨迹生命周期过滤：未确认的暂定轨迹不进入渲染/导出/CSV。
         tracks = tuple(track for track in result.tracks if self._manager.is_confirmed(track))
-        if removed_static:
-            dropped = set(removed_static)
+        removed_extra = removed_duplicates + removed_static
+        if removed_extra:
+            dropped = set(removed_extra)
             tracks = tuple(track for track in tracks if track.track_id not in dropped)
-            removed = result.removed + removed_static
+            removed = result.removed + removed_extra
         else:
             removed = result.removed
         return FrameResult(
@@ -233,8 +269,10 @@ class MOTPipeline:
         self._since_detection = 0
         self._static_anchor.clear()
         self._static_hits.clear()
+        self._dup_streak.clear()
         self.size_rejects = 0
         self.static_removed = 0
+        self.duplicate_removed = 0
 
     def clear_trails(self) -> None:
         self._manager.clear_trails()
@@ -265,6 +303,91 @@ class MOTPipeline:
                     f"got {type(item).__name__}"
                 )
         return out
+
+    def _merge_duplicate_tracks(
+        self, tracks: Sequence[TrackedObject], frame_index: int
+    ) -> Tuple[int, ...]:
+        """轨迹端去重：连续多帧几乎重合的两条轨迹只保留一条。
+
+        检测端 ``_dedupe`` 只能拦住同一帧的重复检测；两个 id 一旦都进入
+        ``TrackManager``，各自独立漂移后就再没有环节能发现它们是同一物体。
+        这里在 ``manager.step`` 之后做兜底：同一对轨迹连续 ``merge_track_frames``
+        帧满足合并条件时，销毁其中较年轻（``created_frame`` 更晚）的一条。
+
+        防误杀条件（必须同时满足）：
+        * 两框 IoU >= ``merge_track_iou``；
+        * 面积比（小/大）>= ``0.15``——小框套大框属于局部框/尺寸问题，不在此处理；
+        * 中心距离 < 1.2 x 两框对角线均值——只重合但位置明显不同的不合并。
+
+        删除统一走 :meth:`TrackManager.remove`，计入 ``duplicate_removed`` 并进入
+        当帧 ``removed`` 事件。
+        """
+        if not self.dedupe_tracks or len(tracks) < 2:
+            self._dup_streak.clear()
+            return ()
+
+        live_ids = {track.track_id for track in tracks}
+        for key in list(self._dup_streak):
+            if key[0] not in live_ids or key[1] not in live_ids:
+                del self._dup_streak[key]
+
+        removed: List[int] = []
+        dropped: set = set()
+        for i in range(len(tracks)):
+            first = tracks[i]
+            if first.track_id in dropped:
+                continue
+            for j in range(i + 1, len(tracks)):
+                second = tracks[j]
+                if second.track_id in dropped:
+                    continue
+                key = (first.track_id, second.track_id)
+                if not self._duplicate_candidate(first, second):
+                    self._dup_streak[key] = 0
+                    continue
+                streak = self._dup_streak.get(key, 0) + 1
+                self._dup_streak[key] = streak
+                if streak < self.merge_track_frames:
+                    continue
+                victim = self._duplicate_victim(first, second)
+                if not self._manager.remove(victim.track_id):
+                    continue
+                removed.append(victim.track_id)
+                dropped.add(victim.track_id)
+                for pair_key in list(self._dup_streak):
+                    if victim.track_id in pair_key:
+                        del self._dup_streak[pair_key]
+        self.duplicate_removed += len(removed)
+        return tuple(removed)
+
+    def _duplicate_candidate(self, first: TrackedObject, second: TrackedObject) -> bool:
+        """两条轨迹是否可能属于同一物体（IoU + 面积比 + 中心距离）。"""
+        if box_iou(first.bbox, second.bbox) < self.merge_track_iou:
+            return False
+        area_first = bbox_area(first.bbox)
+        area_second = bbox_area(second.bbox)
+        larger = max(area_first, area_second)
+        if larger <= 0.0:
+            return False
+        if min(area_first, area_second) / larger < 0.15:
+            return False  # 小框套大框：交给 max_box_change / 静止剔除
+        distance = float(pairwise_centroid_distance([first.bbox], [second.bbox])[0, 0])
+        diagonal_mean = 0.5 * (bbox_diagonal(first.bbox) + bbox_diagonal(second.bbox))
+        return distance < 1.2 * diagonal_mean
+
+    def _duplicate_victim(
+        self, first: TrackedObject, second: TrackedObject
+    ) -> TrackedObject:
+        """选择要销毁的一条：优先保留已确认、质量更高的；同条件下销毁较年轻的。"""
+        confirmed_first = self._manager.is_confirmed(first)
+        confirmed_second = self._manager.is_confirmed(second)
+        if confirmed_first != confirmed_second:
+            return second if confirmed_first else first
+        if first.created_frame != second.created_frame:
+            return first if first.created_frame > second.created_frame else second
+        quality_first = (first.confidence, first.hits, -first.misses)
+        quality_second = (second.confidence, second.hits, -second.misses)
+        return first if quality_first < quality_second else second
 
     def _drop_static_tracks(self) -> Tuple[int, ...]:
         """IoU 时间连续性判定：销毁长时间几乎不动的目标。

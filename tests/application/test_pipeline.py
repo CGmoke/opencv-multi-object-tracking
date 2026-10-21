@@ -155,6 +155,81 @@ class TestDetectorMode:
         with pytest.raises(ValidationError):
             MOTPipeline(make_manager(pool), detection_interval=0)
 
+    def test_invalid_track_dedupe_parameters_are_rejected(self, make_manager, pool):
+        with pytest.raises(ValidationError):
+            MOTPipeline(make_manager(pool), dedupe_tracks="yes")
+        with pytest.raises(ValidationError):
+            MOTPipeline(make_manager(pool), merge_track_iou=0.0)
+        with pytest.raises(ValidationError):
+            MOTPipeline(make_manager(pool), merge_track_frames=0)
+
+
+class TestTrackDedupe:
+    """R3：轨迹端去重——检测端去重之后的兜底。"""
+
+    @staticmethod
+    def _two_overlapping_tracks(make_manager, pool, **kwargs) -> MOTPipeline:
+        """id1 在 frame1 建立，id2 在 frame2 建立；随后让 id2 的框贴近 id1。"""
+        manager = make_manager(pool, min_hits=1)
+        pipeline = MOTPipeline(manager, **kwargs)
+        first = pipeline.step(None, extra_detections=[Detection((10, 10, 20, 20))])
+        assert first.created == (1,)
+        second = pipeline.step(None, extra_detections=[Detection((100, 100, 20, 20))])
+        assert second.created == (2,)
+        # FakeTracker 每帧原样返回内部 box；把 id2 的框移到与 id1 几乎重合。
+        pool.trackers[1].box = (12.0, 10.0, 20.0, 20.0)
+        return pipeline
+
+    def test_five_overlapping_frames_merge_and_keep_the_older_id(
+        self, make_manager, pool
+    ):
+        pipeline = self._two_overlapping_tracks(
+            make_manager, pool, merge_track_frames=5
+        )
+        for _ in range(4):
+            assert pipeline.step(None).removed == ()
+        result = pipeline.step(None)  # 第 5 帧达标 → 销毁较年轻的 id2
+        assert result.removed == (2,)
+        assert pipeline.manager.get(1) is not None
+        assert pipeline.manager.get(2) is None
+        assert pipeline.duplicate_removed == 1
+
+    def test_three_overlapping_frames_do_not_merge(self, make_manager, pool):
+        pipeline = self._two_overlapping_tracks(
+            make_manager, pool, merge_track_frames=5
+        )
+        result = None
+        for _ in range(3):
+            result = pipeline.step(None)
+        assert result is not None and result.removed == ()
+        assert pipeline.manager.get(1) is not None
+        assert pipeline.manager.get(2) is not None
+        assert pipeline.duplicate_removed == 0
+
+    def test_contained_small_box_is_not_merged(self, make_manager, pool):
+        manager = make_manager(pool, min_hits=1)
+        pipeline = MOTPipeline(manager, merge_track_iou=0.01, merge_track_frames=1)
+        created = pipeline.step(
+            None, extra_detections=[Detection((0, 0, 100, 100)), Detection((40, 40, 20, 20))]
+        )
+        assert created.created == (1, 2)
+        result = pipeline.step(None)  # 面积比 0.04 < 0.15 → 不得合并
+        assert result.removed == ()
+        assert pipeline.manager.get(1) is not None
+        assert pipeline.manager.get(2) is not None
+
+    def test_disabled_dedupe_keeps_both_tracks(self, make_manager, pool):
+        pipeline = self._two_overlapping_tracks(
+            make_manager, pool, dedupe_tracks=False
+        )
+        result = None
+        for _ in range(6):
+            result = pipeline.step(None)
+        assert result is not None and result.removed == ()
+        assert pipeline.manager.get(1) is not None
+        assert pipeline.manager.get(2) is not None
+        assert pipeline.duplicate_removed == 0
+
 
 class TestTrackSanityCheck:
     """轨迹二次校验：与轨迹重叠但尺寸突变的检测应被丢弃。"""

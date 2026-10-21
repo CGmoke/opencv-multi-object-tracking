@@ -187,13 +187,20 @@ def draw_hud(
     paused: bool = False,
     backend: str = "csrt",
     source_name: str = "",
+    capture_fps: Optional[float] = None,
+    process_fps: Optional[float] = None,
+    stream_fps: Optional[float] = None,
 ) -> np.ndarray:
-    """绘制状态面板（FPS、id、后端、源）。"""
+    """绘制状态面板（FPS、id、后端、源；可选三段帧率）。"""
     scale = font_scale_for(frame)
     lines = [
         f"FPS {fps:5.1f}   frame {frame_index}",
         f"ids active {n_active} / created {total_ids}   tracker {backend.upper()}",
     ]
+    if capture_fps is not None and process_fps is not None and stream_fps is not None:
+        lines.append(
+            f"CAP {capture_fps:5.1f} / PROC {process_fps:5.1f} / STR {stream_fps:5.1f}"
+        )
     if source_name:
         lines.append(f"source {source_name}")
     if paused:

@@ -648,6 +648,7 @@ def run(config: AppConfig) -> int:
             iou_threshold=config.tracking.iou_threshold,
             max_missing=config.tracking.max_missing,
             max_coast=config.tracking.max_coast,
+            max_parallel=config.tracking.max_parallel,
             trail_length=config.tracking.trail_length,
             match_method=config.tracking.match_method,
             max_tracks=config.tracking.max_tracks,
@@ -671,6 +672,9 @@ def run(config: AppConfig) -> int:
         static_iou=config.motion.static_iou,
         # 静止剔除只用于运动检测模式；手工/外部检测器模式默认不动目标的 ID。
         static_frames=config.motion.static_frames if motion_mode else 0,
+        dedupe_tracks=config.tracking.dedupe_tracks,
+        merge_track_iou=config.tracking.merge_track_iou,
+        merge_track_frames=config.tracking.merge_track_frames,
     )
 
     try:

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .association import MATCH_METHODS, match
@@ -69,6 +70,9 @@ class TrackManager:
         id_allocator: 可选共享分配器；id 单调递增。
         max_tracks: 同时存活 id 的硬上限；超限的检测被拒绝（计入 ``spawn_failures``）
             而非无限增长内存。
+        max_parallel: 并行推进跟踪器的线程数；``0``（默认）表示完全串行。仅将
+            ``update_fn`` 的纯计算并行化，关联与状态机仍在主线程按轨迹顺序执行。
+            线程池惰性创建、跨帧复用，``close()`` / ``reset()`` 时释放。
         box_smoothing: 检测框 EMA 平滑系数（``0 < alpha <= 1``）。``1`` 表示直接使用
             检测框；调小可抑制检测框抖动，但会带来轻微滞后。仅在用检测重锚时生效。
         min_hits: 轨迹确认所需的命中数（默认 ``1`` 即不确认）。未确认的“暂定轨迹”
@@ -90,6 +94,7 @@ class TrackManager:
         match_method: str = "greedy",
         id_allocator: Optional[IdAllocator] = None,
         max_tracks: int = 256,
+        max_parallel: int = 0,
         box_smoothing: float = 1.0,
         min_hits: int = 1,
         smooth_window: int = 0,
@@ -122,6 +127,12 @@ class TrackManager:
                 field="max_coast",
                 value=max_coast,
             )
+        if not 0 <= int(max_parallel) <= 256:
+            raise ValidationError(
+                f"max_parallel must be within [0, 256], got {max_parallel}",
+                field="max_parallel",
+                value=max_parallel,
+            )
 
         self._tracker_factory = tracker_factory
         self._init_fn = init_fn
@@ -132,6 +143,8 @@ class TrackManager:
         self.trail_length = validate_trail_length(trail_length)
         self.match_method = match_method
         self.max_tracks = validate_max_tracks(max_tracks)
+        self.max_parallel = int(max_parallel)
+        self._executor: Optional[ThreadPoolExecutor] = None
         self.box_smoothing = float(box_smoothing)
         self.min_hits = int(min_hits)
         self.smooth_window = int(smooth_window)
@@ -196,26 +209,25 @@ class TrackManager:
         pairs: List[Tuple[int, int]] = []
         # 1. 推进已有跟踪器。跟踪器自报成功只刷新几何，不计命中、不改状态：
         #    ``hits`` 只表示“被检测支持的命中次数”。
-        for track_id in list(self._tracks):
-            track = self._tracks[track_id]
-            track.age += 1
-            box = self._update_fn(track.tracker, frame)
-            if box is not None:
-                box = self._clip_to_frame(box, frame)
-            if box is not None:
-                self._accept_box(track, box, frame_index)
-            else:
-                track.misses += 1
-                track.state = TrackState.LOST
-                if not self.is_confirmed(track):
-                    # 暂定轨迹：一次丢失立即销毁（不进 removed 事件，避免噪声事件）
-                    del self._tracks[track_id]
-                    self.total_removed += 1
-                    self.tentative_dropped += 1
-                elif track.misses > self.max_missing:
-                    del self._tracks[track_id]
-                    self.total_removed += 1
-                    removed.append(track_id)
+        track_ids = list(self._tracks)
+        if self.max_parallel > 0 and len(track_ids) > 1:
+            # 并行路径：只把纯计算（update）放进线程池，状态机仍按原顺序在主线程执行。
+            for track_id in track_ids:
+                self._tracks[track_id].age += 1
+            boxes = self._update_boxes_parallel(track_ids, frame)
+            for track_id, box in zip(track_ids, boxes):
+                removed_id = self._apply_update_result(track_id, box, frame, frame_index)
+                if removed_id is not None:
+                    removed.append(removed_id)
+        else:
+            # 串行路径（默认）：与既有实现完全一致。
+            for track_id in track_ids:
+                track = self._tracks[track_id]
+                track.age += 1
+                box = self._update_fn(track.tracker, frame)
+                removed_id = self._apply_update_result(track_id, box, frame, frame_index)
+                if removed_id is not None:
+                    removed.append(removed_id)
 
         # 2. 把当前帧检测关联到存活 id。
         detections = tuple(detections)
@@ -306,6 +318,7 @@ class TrackManager:
         默认继续计数，使 id 在同一 CSV / 会话内保持唯一。显式传 ``start_id``
         才重排编号（会让两个不同目标共用同一 ``track_id``）。
         """
+        self.close()
         self._tracks.clear()
         self._capacity_warned = False
         self.frame_index = 0
@@ -316,6 +329,55 @@ class TrackManager:
         self.spawn_failures = 0
 
     # -- 内部实现 --------------------------------------------------------
+    def close(self) -> None:
+        """释放并行 update 线程池；可重复调用。"""
+        executor = self._executor
+        self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=True)
+
+    def _update_boxes_parallel(
+        self, track_ids: Sequence[int], frame: Frame
+    ) -> List[Optional[BBox]]:
+        """在复用线程池中并行执行每条轨迹的 update，并按输入顺序返回结果。
+
+        一轨迹一任务，同一 tracker 不会被两个线程同时 update；结果顺序与
+        ``track_ids`` 一致，后续状态机仍在主线程按原顺序执行，保证可复现。
+        """
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(
+                max_workers=self.max_parallel, thread_name_prefix="mot-update"
+            )
+        futures = [
+            self._executor.submit(self._update_fn, self._tracks[track_id].tracker, frame)
+            for track_id in track_ids
+        ]
+        return [future.result() for future in futures]
+
+    def _apply_update_result(
+        self, track_id: int, box: Optional[BBox], frame: Frame, frame_index: int
+    ) -> Optional[int]:
+        """串行处理单条轨迹的 update 结果；返回需要写入 removed 事件的 id。"""
+        track = self._tracks[track_id]
+        if box is not None:
+            box = self._clip_to_frame(box, frame)
+        if box is not None:
+            self._accept_box(track, box, frame_index)
+            return None
+        track.misses += 1
+        track.state = TrackState.LOST
+        if not self.is_confirmed(track):
+            # 暂定轨迹：一次丢失立即销毁（不进 removed 事件，避免噪声事件）
+            del self._tracks[track_id]
+            self.total_removed += 1
+            self.tentative_dropped += 1
+            return None
+        if track.misses > self.max_missing:
+            del self._tracks[track_id]
+            self.total_removed += 1
+            return track_id
+        return None
+
     @staticmethod
     def _clip_to_frame(box: BBox, frame: Frame) -> Optional[BBox]:
         """丢弃（部分）离开画面的跟踪器框。
