@@ -110,6 +110,22 @@ class EventSink(Protocol):
 
 
 @runtime_checkable
+class FrameRecorder(Protocol):
+    """逐帧录像端口：写入一帧（可带轨迹标注），会话结束时关闭。
+
+    录像内容（是否绘制轨迹、写到哪里）由适配器决定；应用层只负责按帧喂入。
+    """
+
+    def write(self, frame: Frame, result: Any) -> None:
+        """写入一帧；``result`` 是应用层 ``FrameResult``（领域层不感知其类型）。"""
+        ...
+
+    def close(self) -> None:
+        """结束写入并冲刷文件（不删除已录内容）。"""
+        ...
+
+
+@runtime_checkable
 class Clock(Protocol):
     """时间来源契约：返回单调递增的秒数。
 
@@ -140,6 +156,7 @@ __all__ = [
     "Detector",
     "EventSink",
     "Frame",
+    "FrameRecorder",
     "FrameSource",
     "Renderer",
     "SelfHostedTracker",

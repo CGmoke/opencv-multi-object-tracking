@@ -34,6 +34,12 @@ button:hover { background: #21262d; }
 .stats dd { margin: 0 0 4px; }
 .paths { padding: 0 12px 10px; font-size: 11px; color: #7d8590; word-break: break-all; }
 .hint { padding: 0 12px 6px; font-size: 11px; color: #7d8590; }
+.recording { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 10px; }
+.recording[hidden] { display: none; }
+.recording-path { flex: 1 1 180px; min-width: 0; font-size: 12px; }
+.recording button { padding: 4px 8px; font-size: 12px; }
+.save-recording { border-color: #2f6f4f; }
+.discard-recording { border-color: #6f2f36; }
 .error { padding: 0 12px 10px; font-size: 12px; color: #ff7b72; }
 
 /* 点击预览放大：全屏浮层，点击任意位置 / Esc / 关闭按钮退出 */

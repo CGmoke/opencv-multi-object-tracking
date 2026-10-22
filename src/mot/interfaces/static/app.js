@@ -92,6 +92,11 @@ function makeCard(session) {
     <dl class="stats"></dl>
     <div class="paths"></div>
     <div class="hint">拖拽可框选新目标（下一帧生效）· 单击放大画面</div>
+    <div class="recording" hidden>
+      <input class="recording-path" placeholder="保存路径（留空使用默认）">
+      <button class="save-recording" type="button">保存录像</button>
+      <button class="discard-recording" type="button">删除录像</button>
+    </div>
     <div class="error"></div>`;
   const img = card.querySelector(".preview");
   img.src = `/stream/${session.id}.mjpeg`;
@@ -107,6 +112,9 @@ function makeCard(session) {
     }
   });
   card.querySelector(".restart").addEventListener("click", async () => {
+    if (card.dataset.recordingPending === "1" && !confirm("重启会丢弃本次未保存的录像，继续？")) {
+      return;
+    }
     try {
       await api(`/api/sessions/${session.id}/restart`, { method: "POST" });
       // 重启会替换服务端会话句柄并关闭旧 MJPEG 连接；流 URL 不变时浏览器
@@ -121,7 +129,33 @@ function makeCard(session) {
       say(error.message);
     }
   });
+  card.querySelector(".save-recording").addEventListener("click", async () => {
+    const pathInput = card.querySelector(".recording-path");
+    try {
+      const data = await api(`/api/sessions/${session.id}/recording/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: pathInput.value.trim() || null }),
+      });
+      say(`录像已保存：${data.saved}`);
+      refresh();
+    } catch (error) {
+      say(error.message);
+    }
+  });
+  card.querySelector(".discard-recording").addEventListener("click", async () => {
+    try {
+      await api(`/api/sessions/${session.id}/recording/discard`, { method: "POST" });
+      say("已删除预录视频");
+      refresh();
+    } catch (error) {
+      say(error.message);
+    }
+  });
   card.querySelector(".remove").addEventListener("click", async () => {
+    if (card.dataset.recordingPending === "1" && !confirm("该会话有未保存的录像，删除后将丢弃。继续？")) {
+      return;
+    }
     try {
       await api(`/api/sessions/${session.id}`, { method: "DELETE" });
       say("已删除会话");
@@ -193,10 +227,22 @@ function updateCard(session) {
     <dt>新建 ID</dt><dd>${session.created_ids ?? 0}</dd>
     <dt>销毁 ID</dt><dd>${session.removed_ids ?? 0}</dd>
     <dt>轨迹点</dt><dd>${session.trail_points ?? 0}</dd>
-    <dt>事件</dt><dd>${session.events ?? 0}</dd>`;
+    <dt>事件</dt><dd>${session.events ?? 0}</dd>
+    <dt>预录</dt><dd>${session.recording_frames ?? 0} 帧</dd>`;
   card.querySelector(".paths").textContent =
     `CSV ${session.csv || "-"} · JSONL ${session.jsonl || "-"}`;
   card.querySelector(".error").textContent = session.error || "";
+  const pendingRecording = Boolean(session.recording_pending);
+  card.dataset.recordingPending = pendingRecording ? "1" : "";
+  const recording = card.querySelector(".recording");
+  recording.hidden = running || !pendingRecording;
+  if (pendingRecording) {
+    const pathInput = recording.querySelector(".recording-path");
+    if (!pathInput.dataset.initialised) {
+      pathInput.value = session.recording_target || "";
+      pathInput.dataset.initialised = "1";
+    }
+  }
   card.querySelector(".stop").style.display = running ? "" : "none";
   card.querySelector(".restart").style.display = running ? "none" : "";
   card.querySelector(".remove").style.display = running ? "none" : "";

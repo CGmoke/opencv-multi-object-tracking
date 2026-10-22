@@ -170,6 +170,57 @@ def test_file_session_writes_csv_and_jsonl(web, sample_video):
     assert Path(snapshot["jsonl"]).exists()
 
 
+def _run_file_session(registry, client, sample_video):
+    session_id = client.post(
+        "/api/sessions", json={"kind": "file", "spec": str(sample_video)}
+    ).get_json()["id"]
+    handle = registry.get(session_id)
+    assert wait_for(lambda: handle.stopped, timeout=10.0)
+    return session_id, handle
+
+
+def test_recording_can_be_saved_after_the_session_stops(web, sample_video, tmp_path):
+    require_csrt()
+    registry, client = web
+    session_id, _handle = _run_file_session(registry, client, sample_video)
+    snapshot = client.get(f"/api/sessions/{session_id}").get_json()
+    if snapshot["recording_frames"] == 0:
+        pytest.skip("video writer unavailable in this OpenCV build")
+
+    target = tmp_path / "saved" / "recording.mp4"
+    response = client.post(
+        f"/api/sessions/{session_id}/recording/save", json={"path": str(target)}
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert Path(payload["saved"]) == target
+    assert payload["bytes"] > 0 and target.exists()
+    assert client.get(f"/api/sessions/{session_id}").get_json()["recording_pending"] is False
+
+
+def test_recording_can_be_discarded_after_the_session_stops(web, sample_video):
+    require_csrt()
+    registry, client = web
+    session_id, _handle = _run_file_session(registry, client, sample_video)
+    snapshot = client.get(f"/api/sessions/{session_id}").get_json()
+    if snapshot["recording_frames"] == 0:
+        pytest.skip("video writer unavailable in this OpenCV build")
+
+    response = client.post(f"/api/sessions/{session_id}/recording/discard")
+    assert response.status_code == 200
+    assert response.get_json()["discarded"] is True
+    assert client.get(f"/api/sessions/{session_id}").get_json()["recording_pending"] is False
+
+
+def test_recording_cannot_be_saved_while_running(web):
+    registry, client = web
+    session_id = client.post("/api/sessions", json={"kind": "browser"}).get_json()["id"]
+    response = client.post(f"/api/sessions/{session_id}/recording/save", json={})
+    assert response.status_code == 400
+    assert "stop the session" in response.get_json()["error"]
+    registry.stop(session_id)
+
+
 def test_upload_accepts_a_video(web, sample_video):
     require_csrt()
     registry, client = web

@@ -19,6 +19,7 @@ from mot.domain.ports import (
     Clock,
     EventSink,
     Frame,
+    FrameRecorder,
     FrameSource,
     Renderer,
     TrajectorySink,
@@ -51,6 +52,7 @@ class TrackingSession:
         sinks: 轨迹接收器（``TrajectorySink``）；只写 ``ACTIVE`` 目标。
         event_sinks: 帧事件接收器（``EventSink``）。
         renderer: 可选渲染/交互端口（``Renderer``）；``None`` 表示无头运行。
+        recorder: 可选逐帧录像端口（``FrameRecorder``）；会话结束时只关闭，不删除文件。
         max_frames: 处理帧数上限。
         seed_boxes: 首帧启动种子框。
 
@@ -67,6 +69,7 @@ class TrackingSession:
         sinks: Sequence[TrajectorySink] = (),
         event_sinks: Sequence[EventSink] = (),
         renderer: Optional[Renderer] = None,
+        recorder: Optional[FrameRecorder] = None,
         max_frames: Optional[int] = None,
         seed_boxes: Sequence[BBox] = (),
     ) -> None:
@@ -76,6 +79,7 @@ class TrackingSession:
         self._sinks = tuple(sinks)
         self._event_sinks = tuple(event_sinks)
         self._renderer = renderer
+        self._recorder = recorder
         self._max_frames = None if max_frames is None else max(1, int(max_frames))
         self._seed_boxes = tuple(seed_boxes)
 
@@ -154,6 +158,8 @@ class TrackingSession:
                 timestamp = self._clock.now() - started
                 result = self._pipeline.step(frame, timestamp)
                 self._persist(result, timestamp)
+                if self._recorder is not None:
+                    self._recorder.write(frame, result)
                 for sink in self._event_sinks:
                     sink.on_frame(result)
 
@@ -168,6 +174,8 @@ class TrackingSession:
         finally:
             for sink in self._sinks:
                 sink.close()
+            if self._recorder is not None:
+                self._recorder.close()
             self._source.release()
 
         return self._collect_stats(processed)

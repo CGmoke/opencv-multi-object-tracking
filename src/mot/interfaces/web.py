@@ -33,6 +33,7 @@ from flask import Flask, Response, jsonify, render_template, request, stream_wit
 
 from mot.adapters.clock import MonotonicClock
 from mot.adapters.queue_source import QueueFrameSource
+from mot.adapters.recording import PendingVideoRecorder
 from mot.adapters.sinks.csv import CsvTrajectoryWriter
 from mot.adapters.sinks.jsonl import JsonlEventSink
 from mot.adapters.sources import open_source
@@ -42,7 +43,7 @@ from mot.application.config import AppConfig
 from mot.application.errors import ConfigError
 from mot.application.pipeline import MOTPipeline
 from mot.application.session import SessionStats, TrackingSession
-from mot.domain.errors import DomainError, SourceError, TrackerSetupError
+from mot.domain.errors import DomainError, SinkError, SourceError, TrackerSetupError
 from mot.domain.lifecycle import TrackManager
 from mot.domain.limits import SUPPORTED_BACKENDS
 from mot.domain.models import normalize_bbox
@@ -100,6 +101,8 @@ class SessionHandle:
         stream_fps: float = 15.0,
         spec: Any = None,
         seed_boxes: List[Any] = (),
+        recorder: Optional[PendingVideoRecorder] = None,
+        recording_target: Optional[Path] = None,
     ) -> None:
         self.id = session_id
         self.name = name
@@ -109,6 +112,8 @@ class SessionHandle:
         self._session = session
         self._source = source
         self._renderer = renderer
+        self._recorder = recorder
+        self.recording_target = recording_target
         self._closers = list(closers)
         self._stats_fn = stats_fn
         self._budget = FrameBudget(window=30, target_fps=stream_fps)
@@ -146,6 +151,28 @@ class SessionHandle:
 
     def join(self, timeout: Optional[float] = None) -> None:
         self._thread.join(timeout=timeout)
+
+    # -- 预录视频 --------------------------------------------------------
+    def save_recording(self, target: Optional[str] = None) -> Path:
+        """把本次运行的预录视频保存到 ``target``（空则用默认路径）。
+
+        Raises:
+            SinkError: 会话仍在运行、没有录像或目标已存在。
+        """
+        if self._recorder is None:
+            raise SinkError("recording is not enabled for this session")
+        if not self.stopped:
+            raise SinkError("stop the session before saving the recording")
+        destination = target.strip() if isinstance(target, str) else None
+        return self._recorder.commit(destination or self.recording_target)
+
+    def discard_recording(self) -> bool:
+        """删除本次运行的预录视频；会话运行中拒绝删除。"""
+        if self._recorder is None:
+            return False
+        if not self.stopped:
+            raise SinkError("stop the session before discarding the recording")
+        return self._recorder.discard()
 
     def _run(self) -> None:
         try:
@@ -250,6 +277,11 @@ class SessionHandle:
             "trail_points": int(live.get("trail_points", 0)),
             "csv": str(self.csv_path) if self.csv_path else None,
             "jsonl": str(self.jsonl_path) if self.jsonl_path else None,
+            "recording_pending": bool(self._recorder.pending) if self._recorder else False,
+            "recording_frames": self._recorder.frames if self._recorder else 0,
+            "recording_target": (
+                str(self.recording_target) if self.recording_target is not None else None
+            ),
         }
         if self._stats is not None:
             snapshot.update(
@@ -358,6 +390,10 @@ class SessionRegistry:
             if handle is None or not handle.stopped:
                 return False
             del self._sessions[session_id]
+        try:  # 删除会话即放弃未保存的预录视频
+            handle.discard_recording()
+        except SinkError:  # pragma: no cover - 已停止的会话不应抛出
+            LOGGER.warning("failed to discard the recording of session %s", session_id)
         LOGGER.info("session %s removed", session_id)
         return True
 
@@ -383,6 +419,10 @@ class SessionRegistry:
             previous = self._sessions.get(session_id)
             if previous is None or not previous.stopped:
                 return None
+            try:  # 重启视为放弃上一次运行未保存的预录视频
+                previous.discard_recording()
+            except SinkError:  # pragma: no cover - 已停止的会话不应抛出
+                LOGGER.warning("failed to discard the recording of session %s", session_id)
             handle = self._build(
                 session_id, previous.kind, previous.spec, previous.name, previous.seed_boxes
             )
@@ -460,6 +500,22 @@ class SessionRegistry:
         csv_writer = CsvTrajectoryWriter(csv_path)
         jsonl_writer = JsonlEventSink(jsonl_path)
 
+        # 每次运行都自动预录；运行结束后由用户决定保存到目标路径或删除。
+        recorder = PendingVideoRecorder(
+            fps=float(getattr(source, "fps", 25.0) or 25.0),
+            pending_dir=out_dir / ".pending",
+            name=f"web_{session_id}",
+            show_trails=config.display.show_trails,
+            show_labels=config.display.show_labels,
+            fade=config.display.trail_fade,
+            pixels_per_meter=config.motion.pixels_per_meter,
+            small_max_m=config.motion.small_max_m,
+            large_min_m=config.motion.large_min_m,
+        )
+        recording_target = out_dir / (
+            f"web_{session_id}_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
+        )
+
         renderer = JpegRenderer(
             stats_fn=pipeline.stats,
             source_name=source.name,
@@ -487,6 +543,8 @@ class SessionRegistry:
             stream_fps=config.web.stream_fps,
             spec=spec,
             seed_boxes=seed_boxes,
+            recorder=recorder,
+            recording_target=recording_target,
         )
         renderer.set_rates_fn(handle.rates_snapshot)
         session = TrackingSession(
@@ -496,6 +554,7 @@ class SessionRegistry:
             sinks=[csv_writer],
             event_sinks=[jsonl_writer, handle],
             renderer=renderer,
+            recorder=recorder,
             seed_boxes=seed_boxes,
         )
         handle._session = session
@@ -581,6 +640,31 @@ def create_app(registry: SessionRegistry) -> Flask:
             return jsonify({"error": str(exc)}), 400
         handle.queue_box(bbox)
         return jsonify({"queued": True})
+
+    @app.post("/api/sessions/<session_id>/recording/save")
+    def api_save_recording(session_id: str) -> Any:
+        handle = registry.get(session_id)
+        if handle is None:
+            return jsonify({"error": "unknown session"}), 404
+        payload = request.get_json(silent=True) or {}
+        try:
+            saved = handle.save_recording(payload.get("path"))
+        except SinkError as exc:
+            return jsonify({"error": str(exc)}), 400
+        LOGGER.info("session %s recording saved to %s", session_id, saved)
+        return jsonify({"saved": str(saved), "bytes": saved.stat().st_size})
+
+    @app.post("/api/sessions/<session_id>/recording/discard")
+    def api_discard_recording(session_id: str) -> Any:
+        handle = registry.get(session_id)
+        if handle is None:
+            return jsonify({"error": "unknown session"}), 404
+        try:
+            discarded = handle.discard_recording()
+        except SinkError as exc:
+            return jsonify({"error": str(exc)}), 400
+        LOGGER.info("session %s recording discarded=%s", session_id, discarded)
+        return jsonify({"discarded": discarded})
 
     @app.post("/api/upload")
     def api_upload() -> Any:

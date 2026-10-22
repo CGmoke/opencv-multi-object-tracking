@@ -30,6 +30,20 @@ def make_session(make_manager, pool, frames, **kwargs):
     return TrackingSession(pipeline, source, clock, **kwargs), source
 
 
+class _FrameCollector:
+    """记录会话喂入的帧，并记录是否被关闭。"""
+
+    def __init__(self) -> None:
+        self.frames = []
+        self.closed = False
+
+    def write(self, frame, result) -> None:
+        self.frames.append((frame, result.frame_index))
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class TestHeadlessRun:
     def test_processes_all_frames_and_writes_sink(self, make_manager, pool):
         sink = RecordingTrajectorySink()
@@ -43,6 +57,15 @@ class TestHeadlessRun:
         assert len(sink.rows) == 3
         assert sink.closed is True
         assert source.released is True
+
+    def test_recorder_receives_every_frame_and_is_closed(self, make_manager, pool):
+        recorder = _FrameCollector()
+        session, _ = make_session(
+            make_manager, pool, [FRAME, FRAME, FRAME], recorder=recorder
+        )
+        session.run()
+        assert recorder.frames == [(FRAME, 1), (FRAME, 2), (FRAME, 3)]
+        assert recorder.closed is True
 
     def test_sink_receives_frame_index_and_timestamp(self, make_manager, pool):
         sink = RecordingTrajectorySink()
