@@ -106,6 +106,12 @@ function makeCard(session) {
   card.querySelector(".restart").addEventListener("click", async () => {
     try {
       await api(`/api/sessions/${session.id}/restart`, { method: "POST" });
+      // 重启会替换服务端会话句柄并关闭旧 MJPEG 连接；流 URL 不变时浏览器
+      // <img> 不会自动重新请求，画面会停在停止前的最后一帧，因此必须显式重连
+      // （加时间戳参数避免缓存命中同一条死连接）。
+      const streamUrl = `/stream/${session.id}.mjpeg?t=${Date.now()}`;
+      img.src = streamUrl;
+      if (!lightbox.hidden && lightboxSessionId === session.id) lightboxImg.src = streamUrl;
       say("已重启会话");
       refresh();
     } catch (error) {

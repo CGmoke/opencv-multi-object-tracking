@@ -297,6 +297,22 @@ class TestRemoveAndRestart:
         assert client.post(f"/api/sessions/{session_id}/restart").status_code == 409
         registry.stop(session_id)
 
+    def test_stopping_session_restarts_without_manual_wait(self, web):
+        """停止后立刻重启：restart 内部等待线程退出，不得误报 409。
+
+        回归背景：stop() 只异步置 quit 事件，此前 restart 要求会话已完全停止，
+        用户在浏览器点「停止」后马上点「重启」会拿到 409，界面无任何反应。
+        """
+        registry, client = web
+        session_id = client.post("/api/sessions", json={"kind": "browser"}).get_json()["id"]
+        assert client.post(f"/api/sessions/{session_id}/stop").status_code == 200
+        # 不 wait_for：restart 自身负责等待退出中的线程
+        response = client.post(f"/api/sessions/{session_id}/restart")
+        assert response.status_code == 200
+        assert response.get_json()["id"] == session_id
+        assert response.get_json()["state"] == "running"
+        registry.stop(session_id)
+
     def test_stopped_file_session_restarts_with_the_same_id(self, web, sample_video):
         require_csrt()
         registry, client = web

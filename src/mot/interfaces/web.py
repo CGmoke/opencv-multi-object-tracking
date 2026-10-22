@@ -119,6 +119,7 @@ class SessionHandle:
         self._last_active = 0
         self._stats: Optional[SessionStats] = None
         self._state = "starting"
+        self._stop_requested = False
         self._error = ""
         self._started_at = time.time()
         self._thread = threading.Thread(target=self._run, name=f"mot-web-{session_id}", daemon=True)
@@ -132,6 +133,7 @@ class SessionHandle:
         """请求停止：置 quit 事件；队列源还需唤醒阻塞中的 ``read()``。"""
         if self._state not in ("running", "starting"):
             return
+        self._stop_requested = True
         self._session.handle_event("quit")
         if isinstance(self._source, QueueFrameSource):
             self._source.release()
@@ -213,6 +215,11 @@ class SessionHandle:
     @property
     def stopped(self) -> bool:
         return self._state in ("done", "error")
+
+    @property
+    def stopping(self) -> bool:
+        """已请求停止但线程尚未退出（``restart`` 据此决定是否等待）。"""
+        return self._stop_requested and not self.stopped
 
     def events(self, since: int) -> List[Dict[str, Any]]:
         return [vars(record) for record in self._events if record.index >= since]
@@ -357,6 +364,9 @@ class SessionRegistry:
     def restart(self, session_id: str) -> Optional[SessionHandle]:
         """用**同一个 id** 重启一个已停止的会话（沿用原输入源与种子框）。
 
+        「停止中」的会话（``stop()`` 只异步置 quit 事件，线程尚未退出）会先在锁外
+        等待其退出，避免用户停止后立刻点重启时误报 409。
+
         Returns:
             新的会话句柄；会话不存在或仍在运行时返回 ``None``。
 
@@ -364,6 +374,11 @@ class SessionRegistry:
             SourceError / TrackerSetupError / ConfigError / ValidationError: 重建失败，
             此时原会话保持不变。
         """
+        previous = self.get(session_id)
+        if previous is None:
+            return None
+        if previous.stopping:
+            previous.join(timeout=5.0)  # 锁外等待，不阻塞其它会话的操作
         with self._lock:
             previous = self._sessions.get(session_id)
             if previous is None or not previous.stopped:
