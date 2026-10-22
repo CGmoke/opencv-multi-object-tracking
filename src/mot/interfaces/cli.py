@@ -753,6 +753,14 @@ def run(config: AppConfig) -> int:
 
 def _run_web(config: AppConfig) -> int:
     """启动本地 Web 监测界面（需要可选 extra：``pip install -e ".[web]"``）。"""
+    if config.detector.backend == "none" and not config.motion.enabled:
+        print(
+            "警告：未启用任何检测源（detector.backend=none 且 motion.enabled=false），"
+            "画面里不会出现目标框与轨迹。\n"
+            "  启用运动检测：mot-web --motion\n"
+            "  或加载调优配置：mot-web --config configs/upload-720.yaml",
+            file=sys.stderr,
+        )
     try:
         from mot.interfaces.web import serve
     except ModuleNotFoundError as exc:
