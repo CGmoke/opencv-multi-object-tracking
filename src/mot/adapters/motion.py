@@ -91,6 +91,15 @@ class MotionDetector:
             恢复期内以 ``warmup_rate`` 更新背景，避免把突变后的亮度当成永久背景。
         min_quality: 候选置信度下限（默认 ``0.45``）：低于该值的候选不输出。
             置信度由形状/填充率/持续性/位移复合而成，不随框面积单调递增。
+        clahe: 是否在灰度图上做 CLAHE 局部光照均衡（默认关闭）。适合墙面色块、
+            灯光不均的场景；会放大噪声，建议同时开 ``median_kernel=3``。
+        clahe_clip: CLAHE 的对比度裁剪限幅（默认 ``2.0``，越大对比越强也越噪）。
+        brightness_step: **亮度突变门控**阈值（默认 ``8`` 个灰度级，``0`` 关闭）。
+            用 1/4 抽样后的灰度中位数作为帧亮度基准（对大面积移动目标稳健），
+            与滑动基线相差达到该值时判定为曝光/开关灯/云影突变：丢弃本帧、
+            重新适应背景，并复用时序窗口，避免整片误检。
+        brightness_rate: 亮度基线的 EMA 更新率（默认 ``0.2``）；越小越不易被
+            缓慢光照漂移触发，但会略微滞后（滞后约 ``(1-rate)/rate`` 个灰度级/帧）。
         blur_kernel: 高斯模糊核边长（奇数，默认 ``5``；``0`` 表示关闭）。在灰度图上
             平滑像素级高频噪声，避免传感器颗粒被背景模型判成前景。
         median_kernel: 中值滤波核边长（奇数，默认 ``0`` 关闭）。对椒盐/压缩噪点比高斯
@@ -147,6 +156,10 @@ class MotionDetector:
         max_fg_ratio: float = 0.25,
         burst_recover_frames: int = 3,
         min_quality: float = 0.45,
+        clahe: bool = False,
+        clahe_clip: float = 2.0,
+        brightness_step: float = 8.0,
+        brightness_rate: float = 0.2,
         blur_kernel: int = 5,
         median_kernel: int = 0,
         temporal_frames: int = 2,
@@ -191,6 +204,12 @@ class MotionDetector:
             raise ValueError(f"burst_recover_frames must be >= 0, got {burst_recover_frames}")
         if not 0.0 <= float(min_quality) <= 1.0:
             raise ValueError(f"min_quality must be within [0, 1], got {min_quality}")
+        if float(clahe_clip) <= 0:
+            raise ValueError(f"clahe_clip must be > 0, got {clahe_clip}")
+        if float(brightness_step) < 0:
+            raise ValueError(f"brightness_step must be >= 0, got {brightness_step}")
+        if not 0.0 < float(brightness_rate) <= 1.0:
+            raise ValueError(f"brightness_rate must be within (0, 1], got {brightness_rate}")
         for name, value in (("blur_kernel", blur_kernel), ("median_kernel", median_kernel)):
             if int(value) < 0 or (int(value) != 0 and int(value) % 2 == 0):
                 raise ValueError(f"{name} must be 0 or a positive odd number, got {value}")
@@ -232,6 +251,10 @@ class MotionDetector:
         self.max_fg_ratio = float(max_fg_ratio)
         self.burst_recover_frames = int(burst_recover_frames)
         self.min_quality = float(min_quality)
+        self.clahe = bool(clahe)
+        self.clahe_clip = float(clahe_clip)
+        self.brightness_step = float(brightness_step)
+        self.brightness_rate = float(brightness_rate)
         self.blur_kernel = int(blur_kernel)
         self.median_kernel = int(median_kernel)
         self.temporal_frames = int(temporal_frames)
@@ -260,6 +283,12 @@ class MotionDetector:
         self._warmup_rate = float(warmup_rate)
         self._frame_count = 0
         self._burst_left = 0
+        self._brightness: Optional[float] = None
+        self._clahe = (
+            cv2.createCLAHE(clipLimit=self.clahe_clip, tileGridSize=(8, 8))
+            if self.clahe
+            else None
+        )
         self._size: Optional[Tuple[int, int]] = None  # (width, height)
         self._candidates: List[_Candidate] = []
         self._masks: Deque[np.ndarray] = deque(maxlen=self.temporal_frames)
@@ -306,14 +335,24 @@ class MotionDetector:
             self._burst_left -= 1
         else:
             rate = self._warmup_rate if warming else self._learning_rate
-        # 先压噪再进背景模型：灰度化 → 高斯（→ 中值）。预热期也用同样的预处理，
-        # 保证背景与检测阶段的输入分布一致。
-        prepared = self._prepare(frame)
+        # 先压噪再进背景模型：灰度化 → CLAHE（可选）→ 高斯（→ 中值）。预热期也用
+        # 同样的预处理，保证背景与检测阶段的输入分布一致。
+        gray = self._to_gray(frame)
+        brightness_jump = self._track_brightness(gray)
+        if brightness_jump:
+            # 曝光/开关灯/云影突变：本帧掩码不可信，进入背景恢复期并清空时序窗口
+            # （旧亮度的掩码与新帧相与会全空，留着只会白白多丢一帧）。
+            self._burst_left = max(self._burst_left, self.burst_recover_frames)
+            self._masks.clear()
+        prepared = self._enhance_gray(gray)
         # 必须用关键字传 learningRate：第二个位置参数在部分 OpenCV 版本里被当作
         # fgmask，导致学习率静默失效（物体躯干被吸收，只剩前沿窄条）。
         mask = self._background.apply(prepared, learningRate=rate)
         if warming:
             self._masks.append(mask)  # 预热期也维护时序窗口，首帧检测即有历史
+            return []
+        if brightness_jump:
+            self._masks.append(mask)  # 让新亮度进入时序窗口，同时丢弃本帧输出
             return []
 
         mask = self._stabilize(mask)
@@ -343,24 +382,55 @@ class MotionDetector:
         self._candidates.clear()
         self._masks.clear()
         self._burst_left = 0
+        self._brightness = None
         if not keep_background:
             self._background = self._make_background()
             self._frame_count = 0
 
     # -- 内部实现 --------------------------------------------------------
-    def _prepare(self, frame: np.ndarray) -> np.ndarray:
-        """输入预处理：灰度化 + 高斯模糊（可选 + 中值滤波）。
+    @staticmethod
+    def _to_gray(frame: np.ndarray) -> np.ndarray:
+        """转灰度（已是灰度则原样返回）。"""
+        if frame.ndim == 3:
+            return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return frame
 
-        只压高频噪声，不做尺寸缩放：缩小会让小目标消失，放大则无收益。
+    def _enhance_gray(self, gray: np.ndarray) -> np.ndarray:
+        """灰度增强：CLAHE（可选）→ 高斯模糊 → 中值滤波（可选）。
+
+        只压高频噪声与局部光照差异，不做尺寸缩放：缩小会让小目标消失，放大则无收益。
         """
-        gray = frame
-        if gray.ndim == 3:
-            gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+        if self._clahe is not None:
+            gray = self._clahe.apply(gray)
         if self.blur_kernel > 1:
             gray = cv2.GaussianBlur(gray, (self.blur_kernel, self.blur_kernel), 0)
         if self.median_kernel > 1:
             gray = cv2.medianBlur(gray, self.median_kernel)
         return gray
+
+    def _prepare(self, frame: np.ndarray) -> np.ndarray:
+        """完整预处理（灰度化 + 增强），供测试与复用。"""
+        return self._enhance_gray(self._to_gray(frame))
+
+    def _track_brightness(self, gray: np.ndarray) -> bool:
+        """帧亮度基线跟踪；检测到突变返回 ``True``。
+
+        用 1/4 抽样的**中位数**而不是均值：大面积移动目标（人走近）只会改变部分
+        像素，中位数基本不动，不会误触发；而曝光/开关灯会让整体分布平移。
+        """
+        if self.brightness_step <= 0:
+            return False
+        level = float(np.median(gray[::4, ::4]))
+        if self._brightness is None:
+            self._brightness = level
+            return False
+        if abs(level - self._brightness) >= self.brightness_step:
+            self._brightness = level  # 吸附到新亮度，避免后续帧连续触发
+            return True
+        self._brightness = (
+            1.0 - self.brightness_rate
+        ) * self._brightness + self.brightness_rate * level
+        return False
 
     def _stabilize(self, mask: np.ndarray) -> np.ndarray:
         """时序一致性：最近 ``temporal_frames`` 帧掩码按位与。

@@ -310,6 +310,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="median blur kernel for salt/pepper noise (odd, 0 = off; try 3)",
     )
     parser.add_argument(
+        "--motion-clahe",
+        dest="motion_clahe",
+        action="store_true",
+        help="apply CLAHE local-contrast equalisation before background modelling",
+    )
+    parser.add_argument(
+        "--motion-clahe-clip",
+        dest="motion_clahe_clip",
+        type=float,
+        default=None,
+        help="CLAHE clip limit (default 2.0; higher = stronger contrast, more noise)",
+    )
+    parser.add_argument(
+        "--motion-brightness-step",
+        dest="motion_brightness_step",
+        type=float,
+        default=None,
+        help="frame brightness jump (grey levels) treated as a lighting burst (0 = off)",
+    )
+    parser.add_argument(
         "--motion-temporal",
         dest="motion_temporal",
         type=int,
@@ -493,6 +513,12 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.motion.blur_kernel = args.motion_blur
     if getattr(args, "motion_median", None) is not None:
         config.motion.median_kernel = args.motion_median
+    if getattr(args, "motion_clahe", False):
+        config.motion.clahe = True
+    if getattr(args, "motion_clahe_clip", None) is not None:
+        config.motion.clahe_clip = args.motion_clahe_clip
+    if getattr(args, "motion_brightness_step", None) is not None:
+        config.motion.brightness_step = args.motion_brightness_step
     if getattr(args, "motion_temporal", None) is not None:
         config.motion.temporal_frames = args.motion_temporal
     if getattr(args, "motion_aspect", None) is not None:
@@ -586,6 +612,10 @@ def _build_motion(config: AppConfig) -> Optional[Any]:
         max_fg_ratio=config.motion.max_fg_ratio,
         burst_recover_frames=config.motion.burst_recover_frames,
         min_quality=config.motion.min_quality,
+        clahe=config.motion.clahe,
+        clahe_clip=config.motion.clahe_clip,
+        brightness_step=config.motion.brightness_step,
+        brightness_rate=config.motion.brightness_rate,
         blur_kernel=config.motion.blur_kernel,
         median_kernel=config.motion.median_kernel,
         temporal_frames=config.motion.temporal_frames,

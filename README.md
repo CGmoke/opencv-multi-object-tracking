@@ -193,6 +193,9 @@ mot-track --dump-config --iou-threshold 0.4 --tracker kcf
 | `--motion-min-consecutive` | `2` | 连续命中帧数（抑制单帧噪点） |
 | `--motion-blur` | `5` | 灰度图高斯模糊核（奇数，`0` 关闭；压制传感器颗粒） |
 | `--motion-median` | `0` | 中值滤波核（奇数，`0` 关闭；椒盐噪声明显时设 `3`） |
+| `--motion-clahe` | 关 | 开启 CLAHE 局部光照均衡（放大噪声，建议搭配 `--motion-median 3`） |
+| `--motion-clahe-clip` | `2.0` | CLAHE 限幅，越大对比越强、噪声也越多 |
+| `--motion-brightness-step` | `8` | 帧亮度突变门控阈值（灰度级，`0` 关闭） |
 | `--motion-temporal` | `2` | 最近 N 帧掩码按位与（`1` 关闭；快目标建议 `1~2`） |
 | `--motion-aspect` | `0.1,10` | 包围框长宽比允许范围（剔除极细长纹理） |
 | `--motion-min-fill` | `0` | 轮廓填充率下限（剔除中空/破碎碎片，`0` 关闭） |
@@ -289,6 +292,8 @@ python3 -m mot --source 0 --motion --motion-sensitivity 10 --motion-min-area 400
 | 过滤 | 参数 | 作用 |
 | --- | --- | --- |
 | 输入预处理 | `blur_kernel` / `median_kernel` | 灰度化后高斯（默认 5×5）/ 中值滤波，压掉传感器颗粒与压缩噪点 |
+| 光照均衡 | `clahe` / `clahe_clip` | CLAHE 提升局部对比，低对比暗区目标更易检出（会放大噪声） |
+| 亮度突变门控 | `brightness_step` / `brightness_rate` | 帧亮度中位数跳变即判定曝光/开关灯/云影，丢弃该帧并重新适应背景 |
 | 背景建模 | `method` / `var_threshold` | MOG2（或 KNN，均 `detectShadows=False`）把静止内容学成背景；阈值默认 25 比 OpenCV 默认 16 更抗纹理抖动 |
 | 时序一致性 | `temporal_frames` | 最近 N 帧掩码按位与，单帧闪烁不进轮廓阶段 |
 | 形态学 | `morph_kernel` | 开运算去孤立噪点 + 闭运算补孔洞/连裂口 |

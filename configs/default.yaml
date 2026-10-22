@@ -95,6 +95,16 @@ motion:
   # Median blur kernel (odd, 0 = off). Stronger against salt/pepper and JPEG
   # artifacts; 3 is usually enough.
   median_kernel: 0
+  # CLAHE local-contrast equalisation (grayscale). Helps with uneven lighting, but
+  # amplifies noise — pair it with median_kernel: 3 when enabling.
+  clahe: false
+  clahe_clip: 2.0
+  # Lighting-burst gate: frame brightness (median of a 1/4 sample) jumping by this
+  # many grey levels means an exposure/lamp/cloud change. That frame is dropped,
+  # the background re-adapts for burst_recover_frames, and stale masks are cleared.
+  # 0 disables the gate.
+  brightness_step: 8.0
+  brightness_rate: 0.2
   # Temporal consistency: AND the last N foreground masks so single-frame flicker
   # and edge jitter never reach the contour stage. 1 disables it; keep N <= 3,
   # because the intersection trims the box of fast-moving targets.

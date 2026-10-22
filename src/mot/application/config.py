@@ -291,6 +291,8 @@ class MotionConfig:
         * ``static_iou`` / ``static_frames``：IoU 时间连续性判定，识别“移动后停下”的目标；
         * ``min_consecutive``：连续命中帧数，用于抑制噪点；
         * ``blur_kernel`` / ``median_kernel``：输入灰度图的高斯 / 中值滤波核（压噪）；
+        * ``clahe`` / ``clahe_clip``：局部光照均衡（压光照不均，代价是放大噪声）；
+        * ``brightness_step`` / ``brightness_rate``：帧亮度突变门控（曝光/开关灯/云影）；
         * ``temporal_frames``：最近 N 帧掩码按位与，压掉单帧闪烁；
         * ``min_aspect`` / ``max_aspect``：长宽比范围，剔极细长纹理；
         * ``min_fill_ratio``：轮廓填充率下限，剔中空/破碎的局部特征；
@@ -314,6 +316,10 @@ class MotionConfig:
     max_area_ratio: float = 0.6
     blur_kernel: int = 5
     median_kernel: int = 0
+    clahe: bool = False
+    clahe_clip: float = 2.0
+    brightness_step: float = 8.0
+    brightness_rate: float = 0.2
     temporal_frames: int = 2
     min_aspect: float = 0.1
     max_aspect: float = 10.0
@@ -364,6 +370,14 @@ class MotionConfig:
         self.max_area_ratio = _as_float(self.max_area_ratio, "motion.max_area_ratio", 1e-6, 1.0)
         self.blur_kernel = _as_kernel(self.blur_kernel, "motion.blur_kernel")
         self.median_kernel = _as_kernel(self.median_kernel, "motion.median_kernel")
+        self.clahe = _require_bool(self.clahe, "motion.clahe")
+        self.clahe_clip = _as_float(self.clahe_clip, "motion.clahe_clip", 1e-6, 100.0)
+        self.brightness_step = _as_float(
+            self.brightness_step, "motion.brightness_step", 0.0, 255.0
+        )
+        self.brightness_rate = _as_float(
+            self.brightness_rate, "motion.brightness_rate", 1e-6, 1.0
+        )
         self.temporal_frames = _as_int(self.temporal_frames, "motion.temporal_frames", 1, 9)
         self.min_aspect = _as_float(self.min_aspect, "motion.min_aspect", 1e-6, 1000.0)
         self.max_aspect = _as_float(self.max_aspect, "motion.max_aspect", 1e-6, 1000.0)

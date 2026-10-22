@@ -171,6 +171,22 @@ class TestBuildConfig:
         assert config.motion.static_iou == 0.9
         assert config.motion.static_frames == 5
 
+    def test_motion_lighting_flags(self):
+        args = build_parser().parse_args(
+            [
+                "--motion",
+                "--motion-clahe",
+                "--motion-clahe-clip",
+                "3.5",
+                "--motion-brightness-step",
+                "12",
+            ]
+        )
+        config = build_config(args)
+        assert config.motion.clahe is True
+        assert config.motion.clahe_clip == 3.5
+        assert config.motion.brightness_step == 12
+
     def test_motion_mask_flags(self):
         args = build_parser().parse_args(
             ["--motion", "--motion-temporal", "3", "--motion-aspect", "0.2,8"]

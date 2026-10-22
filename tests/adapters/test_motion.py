@@ -145,6 +145,9 @@ def test_burst_recovery_restores_detection():
     detector = MotionDetector(warmup_frames=20, temporal_frames=1, min_consecutive=1)
     warm_up(detector)
     assert detector(np.full((HEIGHT, WIDTH, 3), 255, dtype=np.uint8), 0.0) == []
+    # 从强光回到正常亮度同样是一次亮度突变，恢复窗口会重新计时
+    assert detector(blank(), 0.0) == []
+    assert detector._burst_left == 3
     for expected in (2, 1, 0):
         assert detector(blank(), 0.0) == []
         assert detector._burst_left == expected
@@ -430,6 +433,60 @@ def test_zero_static_frames_disables_the_check():
     assert all(detector(with_box(90, 90), 0.0) for _ in range(6))
 
 
+def test_clahe_changes_the_prepared_gray():
+    """均匀画面经 CLAHE 后仍为合法灰度图；关闭时与普通预处理一致。"""
+    frame = with_box(100, 90)
+    plain = MotionDetector(warmup_frames=0)._prepare(frame)
+    enhanced = MotionDetector(warmup_frames=0, clahe=True)._prepare(frame)
+    assert enhanced.ndim == 2 and enhanced.dtype == np.uint8
+    assert enhanced.shape == plain.shape
+    assert not np.array_equal(enhanced, plain)
+
+
+def test_clahe_keeps_a_moving_object_detectable():
+    detector = MotionDetector(warmup_frames=20, clahe=True, clahe_clip=2.0, median_kernel=3)
+    warm_up(detector)
+    assert feed_moving(detector)
+
+
+def test_brightness_jump_drops_the_frame_and_adapts():
+    detector = MotionDetector(warmup_frames=20, brightness_step=8.0, temporal_frames=1)
+    base = np.full((HEIGHT, WIDTH, 3), 100, dtype=np.uint8)
+    for _ in range(20):
+        detector(base, 0.0)
+    brighter = np.full((HEIGHT, WIDTH, 3), 140, dtype=np.uint8)
+    assert detector(brighter, 0.0) == []
+    assert detector._burst_left == detector.burst_recover_frames
+    assert detector._brightness == pytest.approx(140.0)
+
+
+def test_brightness_gate_can_be_disabled():
+    detector = MotionDetector(warmup_frames=0, brightness_step=0.0)
+    detector(np.full((HEIGHT, WIDTH, 3), 100, dtype=np.uint8), 0.0)
+    assert detector._track_brightness(np.full((HEIGHT, WIDTH), 200, dtype=np.uint8)) is False
+
+
+def test_large_moving_object_does_not_trigger_the_gate():
+    """40% 面积的白块不会改变中位数，因此不被误判成光照突变。"""
+    detector = MotionDetector(warmup_frames=0, brightness_step=8.0)
+    baseline = np.full((HEIGHT, WIDTH), 100, dtype=np.uint8)
+    detector._track_brightness(baseline)
+    with_object = baseline.copy()
+    with_object[:, : int(WIDTH * 0.4)] = 255
+    assert detector._track_brightness(with_object) is False
+
+
+def test_gradual_brightness_drift_does_not_trigger():
+    detector = MotionDetector(warmup_frames=0, brightness_step=8.0, brightness_rate=0.2)
+    level = 100
+    detector._track_brightness(np.full((HEIGHT, WIDTH), level, dtype=np.uint8))
+    for _ in range(30):
+        level += 1  # 每帧 +1 的缓慢漂移
+        jumped = detector._track_brightness(np.full((HEIGHT, WIDTH), level, dtype=np.uint8))
+        assert jumped is False
+    assert detector._brightness == pytest.approx(float(level), abs=6.0)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -463,6 +520,9 @@ def test_zero_static_frames_disables_the_check():
         {"static_iou": 0.0},
         {"static_iou": 1.1},
         {"static_frames": -1},
+        {"clahe_clip": 0},
+        {"brightness_step": -1},
+        {"brightness_rate": 0.0},
         {"warmup_frames": -1},
         {"warmup_rate": 0.0},
     ],
