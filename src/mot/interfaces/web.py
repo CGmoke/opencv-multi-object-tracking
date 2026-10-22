@@ -437,6 +437,7 @@ class SessionRegistry:
             box_smoothing=config.tracking.box_smoothing,
             min_hits=config.tracking.min_hits,
             smooth_window=config.tracking.smooth_window,
+            nest_containment=config.tracking.merge_track_containment,
         )
         detector = _build_detector(config)
         motion_mode = config.detector.backend == "none" and config.motion.enabled
@@ -450,6 +451,7 @@ class SessionRegistry:
             dedupe_tracks=config.tracking.dedupe_tracks,
             merge_track_iou=config.tracking.merge_track_iou,
             merge_track_frames=config.tracking.merge_track_frames,
+            merge_track_containment=config.tracking.merge_track_containment,
         )
 
         out_dir = _output_dir(config)

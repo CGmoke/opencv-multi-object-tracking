@@ -182,6 +182,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="consecutive frames two tracks must overlap before merging",
     )
     parser.add_argument(
+        "--merge-track-containment",
+        dest="merge_track_containment",
+        type=float,
+        default=None,
+        help="containment ratio above which a small box nested in a larger box is "
+        "dropped as a duplicate (0 disables)",
+    )
+    parser.add_argument(
         "--max-parallel",
         dest="max_parallel",
         type=int,
@@ -476,6 +484,8 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         config.tracking.merge_track_iou = args.merge_track_iou
     if getattr(args, "merge_track_frames", None) is not None:
         config.tracking.merge_track_frames = args.merge_track_frames
+    if getattr(args, "merge_track_containment", None) is not None:
+        config.tracking.merge_track_containment = args.merge_track_containment
     if getattr(args, "max_parallel", None) is not None:
         config.tracking.max_parallel = args.max_parallel
     if args.detector is not None:
@@ -685,6 +695,7 @@ def run(config: AppConfig) -> int:
             box_smoothing=config.tracking.box_smoothing,
             min_hits=config.tracking.min_hits,
             smooth_window=config.tracking.smooth_window,
+            nest_containment=config.tracking.merge_track_containment,
         )
         detector = build_detector(config)
         motion_mode = detector is None and config.motion.enabled
@@ -705,6 +716,7 @@ def run(config: AppConfig) -> int:
         dedupe_tracks=config.tracking.dedupe_tracks,
         merge_track_iou=config.tracking.merge_track_iou,
         merge_track_frames=config.tracking.merge_track_frames,
+        merge_track_containment=config.tracking.merge_track_containment,
     )
 
     try:

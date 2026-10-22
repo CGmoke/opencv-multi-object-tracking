@@ -31,6 +31,9 @@ function closeLightbox() {
 // （浏览器在派发 click 时按当前位置命中测试）。改用 pointerdown，它必定早于
 // 打开浮层的 mouseup，因此不会自触发。
 lightbox.addEventListener("pointerdown", closeLightbox);
+// 放大画面里也能直接拖拽框选：拦住图片上的 pointerdown，避免触发浮层的“点击关闭”。
+lightboxImg.addEventListener("pointerdown", (event) => event.stopPropagation());
+bindDragToAddBox(lightboxImg, () => lightboxSessionId, () => closeLightbox());
 document.getElementById("lightbox-close").addEventListener("click", closeLightbox);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeLightbox();
@@ -131,13 +134,13 @@ function makeCard(session) {
     refresh();
   });
 
-  bindDragToAddBox(img, session.id, () => openLightbox(session.id));
+  bindDragToAddBox(img, () => session.id, () => openLightbox(session.id));
   grid.appendChild(card);
   cards.set(session.id, card);
   return card;
 }
 
-function bindDragToAddBox(img, sessionId, onTap) {
+function bindDragToAddBox(img, getSessionId, onTap) {
   let start = null;
   const toImageCoords = (event) => {
     const rect = img.getBoundingClientRect();
@@ -159,10 +162,12 @@ function bindDragToAddBox(img, sessionId, onTap) {
     start = null;
     const bbox = [Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1)];
     if (bbox[2] < 8 || bbox[3] < 8) {
-      // 没有拖动 → 视为单击，放大画面
+      // 没有拖动 → 视为单击（预览图放大 / 放大镜退出）
       if (onTap) onTap();
       return;
     }
+    const sessionId = getSessionId();
+    if (!sessionId) return;
     try {
       await api(`/api/sessions/${sessionId}/box`, {
         method: "POST",

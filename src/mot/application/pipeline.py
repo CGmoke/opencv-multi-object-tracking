@@ -31,6 +31,7 @@ from mot.domain.models import (
     bbox_diagonal,
     normalize_bbox,
 )
+from mot.domain.postprocess import intersection_over_min_area
 
 LOGGER = logging.getLogger(__name__)
 
@@ -83,6 +84,8 @@ class MOTPipeline:
             id 各自漂移后重合的情况，这里按轨迹框 IoU 做兜底合并。
         merge_track_iou: 判定两条轨迹属于同一物体的 IoU 阈值（默认 ``0.5``）。
         merge_track_frames: 连续多少帧满足 IoU 才合并（默认 ``5``，防抖）。
+        merge_track_containment: “大框套小框”判定阈值：小框落在更大框内的面积比例达到
+            该值即视为重复框（同帧检测去重与轨迹去重都生效，默认 ``0.85``；``0`` 关闭）。
     """
 
     def __init__(
@@ -96,6 +99,7 @@ class MOTPipeline:
         dedupe_tracks: bool = True,
         merge_track_iou: float = 0.5,
         merge_track_frames: int = 5,
+        merge_track_containment: float = 0.85,
     ) -> None:
         if detector is not None and not callable(detector):
             raise TypeError("detector must be callable: (frame, timestamp) -> Sequence[Detection]")
@@ -141,6 +145,13 @@ class MOTPipeline:
                 field="merge_track_frames",
                 value=merge_track_frames,
             )
+        if not 0.0 <= float(merge_track_containment) <= 1.0:
+            raise ValidationError(
+                "merge_track_containment must be within [0, 1], "
+                f"got {merge_track_containment}",
+                field="merge_track_containment",
+                value=merge_track_containment,
+            )
         self._manager = manager
         self._detector = detector
         self._detection_interval = int(detection_interval)
@@ -150,6 +161,7 @@ class MOTPipeline:
         self.dedupe_tracks = bool(dedupe_tracks)
         self.merge_track_iou = float(merge_track_iou)
         self.merge_track_frames = int(merge_track_frames)
+        self.merge_track_containment = float(merge_track_containment)
         self.size_rejects = 0
         self.static_removed = 0
         self.duplicate_removed = 0
@@ -214,6 +226,7 @@ class MOTPipeline:
             if produced:
                 detections.extend(self._normalize(produced))
         detections = self._reject_size_outliers(detections)
+        detections = self._drop_nested_detections(detections)
         detections = self._dedupe(detections)
         result = self._manager.step(frame, detections)
         removed_duplicates = self._merge_duplicate_tracks(
@@ -314,10 +327,13 @@ class MOTPipeline:
         这里在 ``manager.step`` 之后做兜底：同一对轨迹连续 ``merge_track_frames``
         帧满足合并条件时，销毁其中较年轻（``created_frame`` 更晚）的一条。
 
-        防误杀条件（必须同时满足）：
-        * 两框 IoU >= ``merge_track_iou``；
-        * 面积比（小/大）>= ``0.15``——小框套大框属于局部框/尺寸问题，不在此处理；
-        * 中心距离 < 1.2 x 两框对角线均值——只重合但位置明显不同的不合并。
+        两类重复：
+
+        * **同物体重合**：两框 IoU >= ``merge_track_iou``，面积比（小/大）>= ``0.15``，
+          中心距离 < 1.2 x 两框对角线均值；合并时销毁较年轻的一条。
+        * **大框套小框**：小框面积比 < ``0.9`` 且被较大框覆盖的比例达到
+          ``merge_track_containment``；合并时销毁较小的局部框，保证输出中不会出现
+          “大框里再画小框”。
 
         删除统一走 :meth:`TrackManager.remove`，计入 ``duplicate_removed`` 并进入
         当帧 ``removed`` 事件。
@@ -342,14 +358,19 @@ class MOTPipeline:
                 if second.track_id in dropped:
                     continue
                 key = (first.track_id, second.track_id)
-                if not self._duplicate_candidate(first, second):
+                nested = self._nested_candidate(first, second)
+                if not nested and not self._duplicate_candidate(first, second):
                     self._dup_streak[key] = 0
                     continue
                 streak = self._dup_streak.get(key, 0) + 1
                 self._dup_streak[key] = streak
                 if streak < self.merge_track_frames:
                     continue
-                victim = self._duplicate_victim(first, second)
+                victim = (
+                    self._nested_victim(first, second)
+                    if nested
+                    else self._duplicate_victim(first, second)
+                )
                 if not self._manager.remove(victim.track_id):
                     continue
                 removed.append(victim.track_id)
@@ -374,6 +395,40 @@ class MOTPipeline:
         distance = float(pairwise_centroid_distance([first.bbox], [second.bbox])[0, 0])
         diagonal_mean = 0.5 * (bbox_diagonal(first.bbox) + bbox_diagonal(second.bbox))
         return distance < 1.2 * diagonal_mean
+
+    def _nested_candidate(self, first: TrackedObject, second: TrackedObject) -> bool:
+        """两条轨迹是否构成“大框套小框”（较小框大部分落在较大框内）。"""
+        if self.merge_track_containment <= 0.0:
+            return False
+        area_first = bbox_area(first.bbox)
+        area_second = bbox_area(second.bbox)
+        larger = max(area_first, area_second)
+        if larger <= 0.0 or min(area_first, area_second) / larger >= 0.9:
+            return False  # 尺寸接近的重合交给 IoU 去重
+        return (
+            intersection_over_min_area(first.bbox, second.bbox)
+            >= self.merge_track_containment
+        )
+
+    def _nested_victim(
+        self, first: TrackedObject, second: TrackedObject
+    ) -> TrackedObject:
+        """大框套小框时销毁面积较小的局部框。"""
+        area_first = bbox_area(first.bbox)
+        area_second = bbox_area(second.bbox)
+        if area_first == area_second:
+            return self._duplicate_victim(first, second)
+        return first if area_first < area_second else second
+
+    def _nested_in(self, box: Sequence[float], other: Sequence[float]) -> bool:
+        """``box`` 是否为 ``other`` 内部且面积更小的重复框。"""
+        if self.merge_track_containment <= 0.0:
+            return False
+        box_area = bbox_area(box)
+        other_area = bbox_area(other)
+        if box_area <= 0.0 or box_area >= other_area:
+            return False
+        return intersection_over_min_area(box, other) >= self.merge_track_containment
 
     def _duplicate_victim(
         self, first: TrackedObject, second: TrackedObject
@@ -472,12 +527,31 @@ class MOTPipeline:
             kept.append(detection)
         return kept
 
+    def _drop_nested_detections(self, detections: Sequence[Detection]) -> List[Detection]:
+        """丢弃落在更大活跃轨迹内的重复小框检测。
+
+        运动检测可能在被“整体框”覆盖的区域里再次输出局部小框；若放任它们进入
+        关联，就会在大框里不断生成重复的小框轨迹。这里在关联之前按包含关系
+        丢弃它们，大框轨迹继续由自身跟踪器推进。
+        """
+        if self.merge_track_containment <= 0.0 or not detections:
+            return list(detections)
+        containers = [track.bbox for track in self._manager.active_tracks]
+        if not containers:
+            return list(detections)
+        return [
+            detection
+            for detection in detections
+            if not any(self._nested_in(detection.bbox, box) for box in containers)
+        ]
+
     def _dedupe(self, detections: Sequence[Detection]) -> List[Detection]:
         """在相互重叠的框中只保留置信度最高的一个（同分时保留更大的整体框）。
 
         阈值即关联阈值：同帧内两个“会被当作同一目标”的框不得都去建 id。
         置信度相同的整体框与局部框必须让整体框胜出，否则局部框会先建 id、
-        整体框被当重复丢弃。
+        整体框被当重复丢弃。此外，**小框被大框包含**时一律只保留大框，避免
+        “大框中出现重复的小框”。
         """
         threshold = self._manager.iou_threshold
         ordered = sorted(
@@ -487,8 +561,16 @@ class MOTPipeline:
         )
         kept: List[Detection] = []
         for detection in ordered:
-            if any(box_iou(detection.bbox, other.bbox) >= threshold for other in kept):
+            if any(
+                box_iou(detection.bbox, other.bbox) >= threshold
+                or self._nested_in(detection.bbox, other.bbox)
+                for other in kept
+            ):
                 continue
+            # 先入列的小框若被当前大框包含，用整体框替换局部框。
+            kept = [
+                other for other in kept if not self._nested_in(other.bbox, detection.bbox)
+            ]
             kept.append(detection)
         if len(kept) > MAX_DETECTIONS:
             if not self._warned_truncation:

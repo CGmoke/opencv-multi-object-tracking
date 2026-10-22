@@ -39,11 +39,13 @@ from .models import (
     StepResult,
     TrackedObject,
     TrackState,
+    bbox_area,
     bbox_center,
     clip_bbox,
     normalize_bbox,
 )
 from .ports import Frame, TrackerFactory
+from .postprocess import intersection_over_min_area
 
 LOGGER = logging.getLogger(__name__)
 
@@ -79,6 +81,8 @@ class TrackManager:
             不向渲染/导出输出，且一次丢失就立即销毁，用于过滤 1~2 帧的误检。
         smooth_window: 包围盒滑动平均窗口（``<=1`` 关闭）。开启后对跟踪器输出与检测框
             都做窗口平均，轨迹点因此更平滑；优先级高于 ``box_smoothing``。
+        nest_containment: “大框套小框”判定阈值：小框落在更大目标框内的面积比例达到该值
+            即视为重复框；``0`` 关闭。手动框选时用于保证大框内不出现重复的小框。
     """
 
     def __init__(
@@ -98,6 +102,7 @@ class TrackManager:
         box_smoothing: float = 1.0,
         min_hits: int = 1,
         smooth_window: int = 0,
+        nest_containment: float = 0.85,
     ) -> None:
         if match_method not in MATCH_METHODS:
             raise ValidationError(
@@ -133,6 +138,12 @@ class TrackManager:
                 field="max_parallel",
                 value=max_parallel,
             )
+        if not 0.0 <= float(nest_containment) <= 1.0:
+            raise ValidationError(
+                f"nest_containment must be within [0, 1], got {nest_containment}",
+                field="nest_containment",
+                value=nest_containment,
+            )
 
         self._tracker_factory = tracker_factory
         self._init_fn = init_fn
@@ -148,6 +159,7 @@ class TrackManager:
         self.box_smoothing = float(box_smoothing)
         self.min_hits = int(min_hits)
         self.smooth_window = int(smooth_window)
+        self.nest_containment = float(nest_containment)
         self.tentative_dropped = 0
         self._capacity_warned = False
         self._allocator = id_allocator or IdAllocator()
@@ -207,6 +219,7 @@ class TrackManager:
         spawn_failures = 0
 
         pairs: List[Tuple[int, int]] = []
+        assoc_tracks: Tuple[TrackedObject, ...] = ()
         # 1. 推进已有跟踪器。跟踪器自报成功只刷新几何，不计命中、不改状态：
         #    ``hits`` 只表示“被检测支持的命中次数”。
         track_ids = list(self._tracks)
@@ -234,6 +247,7 @@ class TrackManager:
         if detections:
             pairs, _unmatched_tracks, unmatched_detections = self._associate(detections)
             snapshot = self.tracks
+            assoc_tracks = snapshot
             for track_idx, det_idx in pairs:
                 track = snapshot[track_idx]
                 detection = detections[det_idx]
@@ -267,22 +281,48 @@ class TrackManager:
             self.total_removed += 1
             removed.append(track_id)
 
+        # 第 3 步可能销毁已滑行到期的 LOST 轨迹，导致存活列表缩短、下标整体前移；
+        # 因此把关联下标按 ``track_id`` 重映射到最终列表，避免 matched_ids 越界。
+        tracks = self.tracks
+        index_by_id = {track.track_id: index for index, track in enumerate(tracks)}
+        matched = tuple(
+            (index_by_id[track_id], det_index)
+            for track_id, det_index in (
+                (assoc_tracks[track_index].track_id, det_index)
+                for track_index, det_index in pairs
+            )
+            if track_id in index_by_id
+        )
         return StepResult(
-            tracks=self.tracks,
+            tracks=tracks,
             created=tuple(created),
             removed=tuple(removed),
-            matched=tuple(pairs),
+            matched=matched,
             spawn_failures=spawn_failures,
         )
 
     def add_or_refresh(self, frame: Frame, detection: Detection) -> Optional[TrackedObject]:
         """新增手工框，或刷新其重叠到的 id。
 
-        同一物体被重复框选不得产生第二个身份：当新框与某存活目标的 IoU 达到
-        ``iou_threshold`` 时刷新该目标而非新建。
+        同一物体被重复框选不得产生第二个身份：
+
+        * 新框与某存活目标的 IoU 达到 ``iou_threshold`` 时刷新该目标而非新建；
+        * 新框大部分落在更大的已有目标内时，视为重复的小框，直接返回该大框
+          （不新建、不缩小大框）；
+        * 新框包含已有的小框时，先销毁这些小框，再关联或新建——保证“大框中
+          不会出现重复的小框”。
         """
         if len(self._tracks) == 0:
             return self._spawn(detection, frame, self.frame_index)
+
+        box = normalize_bbox(detection.bbox)
+        enclosing = self._enclosing_track(box)
+        if enclosing is not None:
+            return enclosing
+
+        for track in list(self._tracks.values()):
+            if self._contains(box, track.bbox):
+                self.remove(track.track_id)
 
         pairs, _unmatched_tracks, _unmatched = self._associate([detection])
         if pairs:
@@ -297,6 +337,32 @@ class TrackManager:
             track.last_detection_frame = self.frame_index
             return track
         return self._spawn(detection, frame, self.frame_index)
+
+    def _enclosing_track(self, box: BBox) -> Optional[TrackedObject]:
+        """返回把 ``box`` 大部分包住的更大存活目标；没有则返回 ``None``。"""
+        if self.nest_containment <= 0.0:
+            return None
+        area = bbox_area(box)
+        if area <= 0.0:
+            return None
+        best: Optional[TrackedObject] = None
+        for track in self._tracks.values():
+            if bbox_area(track.bbox) <= area:
+                continue
+            if intersection_over_min_area(track.bbox, box) < self.nest_containment:
+                continue
+            if best is None or bbox_area(track.bbox) < bbox_area(best.bbox):
+                best = track
+        return best
+
+    def _contains(self, outer: BBox, inner: BBox) -> bool:
+        """``inner`` 是否为 ``outer`` 内的重复小框（面积更小且被包含比例达标）。"""
+        if self.nest_containment <= 0.0:
+            return False
+        inner_area, outer_area = bbox_area(inner), bbox_area(outer)
+        if inner_area <= 0.0 or outer_area <= inner_area:
+            return False
+        return intersection_over_min_area(outer, inner) >= self.nest_containment
 
     def remove(self, track_id: int) -> bool:
         """立即销毁一个 id（交互式删除）。"""

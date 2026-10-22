@@ -287,6 +287,7 @@ class TestOptimizationKeys:
         assert tracking.dedupe_tracks is True
         assert tracking.merge_track_iou == 0.5
         assert tracking.merge_track_frames == 5
+        assert tracking.merge_track_containment == 0.85
         assert tracking.max_parallel == 0
 
     def test_motion_defaults(self):
@@ -334,6 +335,8 @@ class TestOptimizationKeys:
             "  merge_track_iou: 0\n",
             "  merge_track_iou: 1.1\n",
             "  merge_track_frames: 0\n",
+            "  merge_track_containment: -0.1\n",
+            "  merge_track_containment: 1.1\n",
             "  max_parallel: -1\n",
             "  max_parallel: 257\n",
         ],

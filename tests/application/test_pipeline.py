@@ -35,14 +35,33 @@ class TestManualMode:
         with pytest.raises(ValidationError):
             pipeline.add_manual_box(None, (0, 0, 0, 0))
 
-    def test_delete_at_picks_the_smallest_containing_target(self, make_manager, pool):
+    def test_delete_at_removes_the_target_under_the_point(self, make_manager, pool):
+        pipeline = make_pipeline(make_manager, pool)
+        first = pipeline.add_manual_box(None, (0, 0, 100, 100))
+        second = pipeline.add_manual_box(None, (200, 200, 100, 100))
+        assert first is not None and second is not None
+        assert pipeline.delete_at((250.0, 250.0)) == second.track_id
+        assert pipeline.manager.get(first.track_id) is not None
+
+    def test_manual_box_inside_a_larger_target_creates_no_new_id(self, make_manager, pool):
         pipeline = make_pipeline(make_manager, pool)
         large = pipeline.add_manual_box(None, (0, 0, 100, 100))
-        small = pipeline.add_manual_box(None, (10, 10, 20, 20))
-        assert large is not None and small is not None
-        removed = pipeline.delete_at((15.0, 15.0))
-        assert removed == small.track_id
-        assert pipeline.remove(large.track_id) is True
+        inner = pipeline.add_manual_box(None, (10, 10, 20, 20))
+        assert large is not None and inner is not None
+        assert inner.track_id == large.track_id
+        assert len(pipeline.tracks) == 1
+        assert pipeline.tracks[0].bbox == (0.0, 0.0, 100.0, 100.0)
+
+    def test_large_manual_box_replaces_nested_small_tracks(self, make_manager, pool):
+        pipeline = make_pipeline(make_manager, pool)
+        first = pipeline.add_manual_box(None, (10, 10, 20, 20))
+        second = pipeline.add_manual_box(None, (60, 60, 20, 20))
+        big = pipeline.add_manual_box(None, (0, 0, 100, 100))
+        assert first is not None and second is not None and big is not None
+        assert pipeline.manager.get(first.track_id) is None
+        assert pipeline.manager.get(second.track_id) is None
+        assert len(pipeline.tracks) == 1
+        assert pipeline.tracks[0].bbox == (0.0, 0.0, 100.0, 100.0)
 
     def test_delete_at_returns_none_for_empty_space(self, make_manager, pool):
         pipeline = make_pipeline(make_manager, pool)
@@ -162,6 +181,8 @@ class TestDetectorMode:
             MOTPipeline(make_manager(pool), merge_track_iou=0.0)
         with pytest.raises(ValidationError):
             MOTPipeline(make_manager(pool), merge_track_frames=0)
+        with pytest.raises(ValidationError):
+            MOTPipeline(make_manager(pool), merge_track_containment=1.1)
 
 
 class TestTrackDedupe:
@@ -206,16 +227,52 @@ class TestTrackDedupe:
         assert pipeline.manager.get(2) is not None
         assert pipeline.duplicate_removed == 0
 
-    def test_contained_small_box_is_not_merged(self, make_manager, pool):
+    def test_nested_small_detection_is_collapsed(self, make_manager, pool):
+        """同帧“大框 + 大框内小框”只保留大框，避免大框内出现重复小框。"""
         manager = make_manager(pool, min_hits=1)
         pipeline = MOTPipeline(manager, merge_track_iou=0.01, merge_track_frames=1)
-        created = pipeline.step(
+        result = pipeline.step(
             None, extra_detections=[Detection((0, 0, 100, 100)), Detection((40, 40, 20, 20))]
         )
-        assert created.created == (1, 2)
-        result = pipeline.step(None)  # 面积比 0.04 < 0.15 → 不得合并
-        assert result.removed == ()
+        assert result.created == (1,)
+        assert [det.bbox for det in result.detections] == [(0.0, 0.0, 100.0, 100.0)]
+        assert pipeline.manager.get(2) is None
+
+    def test_nested_track_is_removed_after_the_dedupe_window(self, make_manager, pool):
+        """两个 id 漂移成“大框套小框”后，应在防抖窗口后销毁小框。"""
+        manager = make_manager(pool, min_hits=1)
+        pipeline = MOTPipeline(manager, merge_track_frames=2)
+        first = pipeline.step(
+            None,
+            extra_detections=[Detection((0, 0, 100, 100)), Detection((300, 300, 20, 20))],
+        )
+        assert first.created == (1, 2)
+        # 模拟 id2 的跟踪器漂移进 id1 的大框内。
+        pool.trackers[1].box = (40.0, 40.0, 20.0, 20.0)
+        assert pipeline.step(None).removed == ()  # 第 1 帧满足包含关系
+        result = pipeline.step(None)  # 第 2 帧 → 销毁小框 id2
+        assert result.removed == (2,)
         assert pipeline.manager.get(1) is not None
+        assert pipeline.manager.get(2) is None
+        assert pipeline.duplicate_removed == 1
+
+    def test_nested_detection_against_an_existing_track_is_dropped(
+        self, make_manager, pool
+    ):
+        """已有大框轨迹时，落在它内部的小框检测不得再建 id。"""
+        pipeline = MOTPipeline(make_manager(pool, min_hits=1))
+        pipeline.step(None, extra_detections=[Detection((0, 0, 100, 100))])
+        result = pipeline.step(None, extra_detections=[Detection((40, 40, 20, 20))])
+        assert result.created == ()
+        assert result.detections == ()
+        assert pipeline.manager.get(2) is None
+
+    def test_nested_guard_can_be_disabled(self, make_manager, pool):
+        manager = make_manager(pool, min_hits=1)
+        pipeline = MOTPipeline(manager, merge_track_containment=0.0)
+        pipeline.step(None, extra_detections=[Detection((0, 0, 100, 100))])
+        result = pipeline.step(None, extra_detections=[Detection((40, 40, 20, 20))])
+        assert result.created == (2,)
         assert pipeline.manager.get(2) is not None
 
     def test_disabled_dedupe_keeps_both_tracks(self, make_manager, pool):

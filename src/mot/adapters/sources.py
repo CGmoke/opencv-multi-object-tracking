@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 from typing import Optional, Tuple, Union
@@ -34,6 +35,21 @@ URL_SCHEMES: Tuple[str, ...] = (
 def is_url(spec: object) -> bool:
     """返回 ``spec`` 是否为网络流地址（rtsp / rtmp / http(s) / udp / tcp）。"""
     return isinstance(spec, str) and spec.strip().lower().startswith(URL_SCHEMES)
+
+
+def camera_apis() -> Tuple[int, ...]:
+    """返回本平台优先尝试的摄像头后端。
+
+    OpenCV 5 的 ``CAP_ANY`` 可能先尝试 FFMPEG / obsensor，对普通 UVC 摄像头会报
+    ``Camera index out of range``，因此摄像头索引优先显式指定系统后端。
+    """
+    if sys.platform.startswith("linux"):
+        return (cv2.CAP_V4L2,)
+    if sys.platform == "win32":
+        return (cv2.CAP_DSHOW, cv2.CAP_MSMF)
+    if sys.platform == "darwin":
+        return (cv2.CAP_AVFOUNDATION,)
+    return ()
 
 
 def resolve_source(spec: SourceSpec) -> Union[str, int]:
@@ -78,16 +94,35 @@ class VideoSource:
         self._is_camera = isinstance(self._resolved, int)
         self._is_url = is_url(self._resolved)
         self.loop = bool(loop) and not self._is_camera and not self._is_url
-        self._capture: Optional[cv2.VideoCapture] = cv2.VideoCapture(self._resolved)
-        if not self._capture.isOpened():
+        self._capture: Optional[cv2.VideoCapture] = self._open_capture()
+        if self._capture is None or not self._capture.isOpened():
+            if self._is_camera:
+                raise SourceError(
+                    f"could not open camera index {self._resolved}. Check that the device "
+                    "exists (`ls /dev/video*`), that your user is in the `video` group "
+                    "(`sudo usermod -aG video $USER`, then re-login), and that no other app "
+                    "is using it. On a headless/server host without a camera, use the "
+                    "browser camera source instead.",
+                    field="source",
+                    value=self._resolved,
+                )
             raise SourceError(
                 f"could not open video source {self._resolved!r}. "
-                "For a camera, check the index and permissions; for a file, check the path "
-                "and that OpenCV has the matching codec (FFMPEG/GStreamer).",
+                "Check the path and that OpenCV has the matching codec (FFMPEG/GStreamer).",
                 field="source",
                 value=self._resolved,
             )
         self._frame_count = 0
+
+    def _open_capture(self) -> cv2.VideoCapture:
+        """打开采集器；摄像头索引优先使用平台原生后端，失败再回退 ``CAP_ANY``。"""
+        if self._is_camera:
+            for api in camera_apis():
+                capture = cv2.VideoCapture(self._resolved, api)
+                if capture.isOpened():
+                    return capture
+                capture.release()
+        return cv2.VideoCapture(self._resolved)
 
     # -- 只读视图 --------------------------------------------------------
     @property
@@ -264,6 +299,7 @@ __all__ = [
     "SourceSpec",
     "UrlSource",
     "VideoSource",
+    "camera_apis",
     "is_url",
     "open_source",
     "resolve_source",

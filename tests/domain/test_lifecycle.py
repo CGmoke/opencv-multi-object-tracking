@@ -239,6 +239,21 @@ class TestLossAndExpiry:
         assert result.removed == (1,)
         assert manager.get(1) is None
 
+    def test_matched_indices_stay_valid_when_a_coasted_track_is_removed(self, make_manager, pool):
+        """同帧销毁到期的 LOST 轨迹后，``matched`` 下标仍须指向返回值里的 ``tracks``。"""
+        manager = make_manager(pool, min_hits=1, max_missing=50, max_coast=2)
+        box_a = (10.0, 10.0, 20.0, 20.0)
+        box_b = (100.0, 100.0, 20.0, 20.0)
+        manager.step(None, [Detection(box_a), Detection(box_b)])  # frame 1
+        pool.trackers[0].alive = False  # 1 号跟踪器失效
+        manager.step(None)  # frame 2：1 号变 LOST
+        # frame 3：2 号命中；1 号距最后一次检测 2 帧 → 同帧被 coast 回收
+        result = manager.step(None, [Detection(box_b)])
+        assert result.removed == (1,)
+        assert [track.track_id for track in result.tracks] == [2]
+        assert result.matched == ((0, 0),)
+        assert result.matched_ids == ((2, "object"),)
+
     def test_lost_track_does_not_recover_without_detection(self, make_manager, pool):
         """LOST 后跟踪器复活不增加 hits、不恢复 ACTIVE。"""
         manager = make_manager(pool, min_hits=3, max_missing=20, max_coast=20)
@@ -285,6 +300,34 @@ class TestManualBoxes:
         track = manager.add_or_refresh(None, Detection(BOX))
         assert track is not None
         assert track.created_frame == 0
+
+    def test_small_manual_box_inside_a_larger_target_is_ignored(self, manager):
+        """大框内框选小框不得产生重复 id，也不得把大框缩小。"""
+        large = manager.add_or_refresh(None, Detection((0, 0, 100, 100)))
+        inner = manager.add_or_refresh(None, Detection((10, 10, 20, 20)))
+        assert large is not None and inner is not None
+        assert inner.track_id == large.track_id
+        assert len(manager) == 1
+        assert manager.get(large.track_id).bbox == (0.0, 0.0, 100.0, 100.0)
+
+    def test_large_manual_box_removes_nested_small_tracks(self, manager):
+        """手工框选整体目标时，框内已有的小框轨迹应被回收。"""
+        first = manager.add_or_refresh(None, Detection((10, 10, 20, 20)))
+        second = manager.add_or_refresh(None, Detection((60, 60, 20, 20)))
+        big = manager.add_or_refresh(None, Detection((0, 0, 100, 100)))
+        assert first is not None and second is not None and big is not None
+        assert manager.get(first.track_id) is None
+        assert manager.get(second.track_id) is None
+        assert len(manager) == 1
+        assert manager.get(big.track_id).bbox == (0.0, 0.0, 100.0, 100.0)
+
+    def test_nest_guard_can_be_disabled(self, make_manager, pool):
+        manager = make_manager(pool, nest_containment=0.0)
+        manager.add_or_refresh(None, Detection((0, 0, 100, 100)))
+        inner = manager.add_or_refresh(None, Detection((10, 10, 20, 20)))
+        assert inner is not None
+        assert inner.track_id == 2
+        assert len(manager) == 2
 
 
 class TestRefreshFailureIsNonFatal:

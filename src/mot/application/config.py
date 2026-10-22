@@ -134,6 +134,9 @@ class TrackingConfig:
     merge_track_iou: float = 0.5
     #: 连续 N 帧满足重叠条件才合并（防抖）。
     merge_track_frames: int = 5
+    #: “大框套小框”判定阈值：小框被大框覆盖的面积比例达到该值即视为重复框
+    #: （同帧检测与轨迹去重都生效；``0`` 关闭）。
+    merge_track_containment: float = 0.85
     #: 并行推进的跟踪器数量；``0`` 表示串行。
     max_parallel: int = 0
 
@@ -174,6 +177,9 @@ class TrackingConfig:
         )
         self.merge_track_frames = _as_int(
             self.merge_track_frames, "tracking.merge_track_frames", 1, 100_000
+        )
+        self.merge_track_containment = _as_float(
+            self.merge_track_containment, "tracking.merge_track_containment", 0.0, 1.0
         )
         self.max_parallel = _as_int(self.max_parallel, "tracking.max_parallel", 0, 256)
 
