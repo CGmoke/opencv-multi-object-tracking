@@ -1,0 +1,113 @@
+# ---------------------------------------------------------------------------
+# 实时 720p 性能预设（≈720x1280 竖屏 / 手持或浏览器摄像头）
+#
+# 基于 configs/upload-720.yaml 的检测阈值，按实测瓶颈做帧率优化：
+#   * MOSSE 创建跟踪器 ~0ms、update ~0.6ms（KCF 创建 11ms、update 3.3ms；
+#     CSRT update 15~21ms），适合 ID 频繁生灭的实时场景；
+#   * max_missing 8 -> 6、trail_length 120 -> 50：更快释放成本、减少绘制开销；
+#   * show_trails false：20 条轨迹的绘制约 4ms/帧，需要轨迹线时再打开；
+#   * motion.interval 1 -> 2：检测本身只要 ~4ms/帧，减半只为给跟踪器让路；
+#   * web.stream_fps 10 -> 15：MJPEG 推流上限，不再限制画面刷新。
+#
+# 用法：
+#   mot-web --config configs/realtime-720.yaml --motion
+#   mot-track --config configs/realtime-720.yaml --dump-config   # 先校验加载
+# ---------------------------------------------------------------------------
+source:
+  source: "0"
+  max_frames: null
+  loop: false
+  seed_boxes: []
+
+tracking:
+  # MOSSE：实测创建 ~0ms、update ~0.6ms（120x200 框 @720p），实时优先。
+  # 需要更高精度时改回 kcf（创建 11ms）或 csrt（update 15~21ms）。
+  backend: mosse
+  iou_threshold: 0.35
+  max_missing: 6
+  trail_length: 50
+  match_method: greedy
+  # FPS 地板：超出容量的候选直接 spawn 失败，切断噪点正反馈。
+  max_tracks: 24
+  box_smoothing: 1.0
+  min_hits: 3
+  smooth_window: 3
+  max_box_change: 1.5
+  max_coast: 8
+  dedupe_tracks: true
+  merge_track_iou: 0.5
+  merge_track_frames: 5
+  max_parallel: 0
+
+detector:
+  backend: none
+  model: null
+  confidence: 0.35
+  classes: []
+  interval: 1
+
+motion:
+  enabled: true
+  method: mog2
+  var_threshold: 32.0
+  # 手持/摄像头场景保留小幅学习率，避免冻结背景产生 ghost。
+  learning_rate: 0.01
+  warmup_frames: 30
+  warmup_rate: 0.05
+  # 720x1280 口径的尺寸阈值（≈640x480 的 3 倍像素量）。
+  min_area_px: 3600.0
+  min_width_px: 30
+  min_height_px: 30
+  max_area_ratio: 0.3
+  blur_kernel: 5
+  median_kernel: 3
+  clahe: false
+  clahe_clip: 2.0
+  brightness_step: 8.0
+  brightness_rate: 0.2
+  temporal_frames: 2
+  min_aspect: 0.3
+  max_aspect: 3.0
+  min_fill_ratio: 0.35
+  merge_iou: 0.35
+  merge_gap_px: 0.0
+  nms_iou: 0.45
+  nms_containment: 0.6
+  min_consecutive: 3
+  min_motion_px: 15.0
+  static_iou: 0.95
+  static_frames: 20
+  morph_kernel: 5
+  # 检测降到每 2 帧一次：检测成本 ~4ms，主要给跟踪器让出时间片。
+  interval: 2
+  max_fg_ratio: 0.25
+  burst_recover_frames: 3
+  min_quality: 0.45
+  merge_growth: 3.0
+  max_drift_px: 0.0
+  pixels_per_meter: null
+  small_max_m: 0.5
+  large_min_m: 2.0
+
+display:
+  enabled: true
+  # 轨迹绘制约 4ms/帧（20 目标），实时优先先关闭；需要时改 true。
+  show_trails: false
+  show_labels: true
+  show_hud: true
+  trail_fade: true
+  window_name: "OpenCV MOT"
+
+output:
+  csv_path: null
+  video_path: null
+  append: false
+
+web:
+  host: "127.0.0.1"
+  port: 8000
+  max_sessions: 4
+  # MJPEG 推流上限；浏览器摄像头回传仍受前端 ~8fps 采集限制。
+  stream_fps: 15.0
+  upload_dir: null
+  max_upload_bytes: 2000000000
